@@ -680,10 +680,10 @@
   // pointing at its own Sheet + Apps Script deployment (and, ideally, its
   // own Google Cloud OAuth Client ID). Never point a test/dev copy at the
   // production SCRIPT_URL below — see the deployment guide.
-  var SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby7LvnkRzA9qCX7eRBcAJD4IxKvDzqYYb1cmTqJoRSWlF8rA4x2aR1SWSjYFAZfhGtB/exec';
+  var SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwhjqd5eLr2zVCj36Q_KJOgOrdSfNvYQl5FaLvLc2u4-cco_fNeVkOGTY_RWJbrkQ73QQ/exec';
   // Your Google OAuth Client ID (Google Cloud Console), ending in
   // ".apps.googleusercontent.com". Not a secret — see the setup guide.
-  var CLIENT_ID = 'PASTE_YOUR_GOOGLE_OAUTH_CLIENT_ID_HERE';
+  var CLIENT_ID = '632947276461-4k1j3boj2cjif948kn53da71et6s70kk.apps.googleusercontent.com';
   var SYNC_POLL_MS = 20000;
   var jsonpCounter = 0;
   var STATE_KEY_FOR_SHEET = { contacts:'contacts', deals:'deals', tasks:'tasks', goals:'goalsHistory' };
@@ -2401,7 +2401,7 @@
 
   // ---------- authentication ----------
   function describeLoginError(err){
-    if (err === 'not_authorized') return 'This Google account is not authorized for this CRM. Ask your administrator to add you.';
+    if (err === 'not_authorized') return 'This Google account is not authorized to access the Superior Glass Calibration CRM.';
     if (err === 'deactivated') return 'This account has been deactivated. Contact your administrator.';
     if (err === 'wrong_audience') return 'Sign-in configuration error. Contact your administrator.';
     if (err === 'email_not_verified') return 'Your Google account\u2019s email isn\u2019t verified. Contact your administrator.';
@@ -2413,12 +2413,20 @@
     document.getElementById('app-shell').hidden = true;
     document.getElementById('login-status').textContent = msg || '';
   }
-  function initGoogleSignIn(){
+  function initGoogleSignIn(attempt){
+    attempt = attempt || 0;
     if (!clientConfigured()){
       showLoginScreen('Sign-in isn\u2019t configured yet. Contact your administrator.');
       return;
     }
-    if (!window.google || !window.google.accounts){ setTimeout(initGoogleSignIn, 300); return; }
+    if (!window.google || !window.google.accounts){
+      if (attempt >= 33){ // ~10 seconds of retrying at 300ms
+        showLoginScreen('Could not load Google Sign-In. This is usually caused by an ad blocker, privacy extension, or firewall blocking accounts.google.com \u2014 please allow it and reload this page.');
+        return;
+      }
+      setTimeout(function(){ initGoogleSignIn(attempt + 1); }, 300);
+      return;
+    }
     google.accounts.id.initialize({ client_id: CLIENT_ID, callback: handleCredentialResponse, auto_select: true });
     var target = document.getElementById('google-signin-btn');
     if (target){ target.innerHTML = ''; google.accounts.id.renderButton(target, { theme:'outline', size:'large', width:280 }); }
