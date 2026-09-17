@@ -799,7 +799,7 @@
     var stateKey = STATE_KEY_FOR_SHEET[sheetName];
     var current = state[stateKey] ? state[stateKey][id] : null;
     var mine = current && current.updatedBy === (state.currentUser&&state.currentUser.email) && new Date(current.updatedAt).getTime() >= startedAt - 3000;
-    if (mine){ setSyncBadge('saved'); scheduleIdle(); return; }
+    if (mine){ setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle(); return; }
     if (current && (current._version||0) > expectedVersion){
       setSyncBadge('conflict');
       showConflictNotice(sheetName, current);
@@ -969,7 +969,6 @@
     var merged = Object.assign({}, existing||{}, data, { id: monthKey });
     state.goalsHistory[monthKey] = merged;
     persistLocal(); render();
-    flashSaved();
     confirmedWrite('goals', monthKey, data, expectedVersion);
   }
   function saveTask(id, data){
