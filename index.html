@@ -780,33 +780,53 @@
   }
 
   // ---------- confirmed writes (Saving... -> Saved / Not synced) ----------
-  function confirmedWrite(sheetName, id, data, expectedVersion){
+  function confirmedWrite(sheetName, id, data, expectedVersion, options){
     setSyncBadge('saving');
     var startedAt = Date.now();
     apiPostRaw({ action:'saveRecord', sheet:sheetName, id:id, data:data, expectedVersion:expectedVersion });
-    return verifyWrite(sheetName, id, expectedVersion, startedAt, 0);
+    return verifyWrite(sheetName, id, data, expectedVersion, startedAt, 0, options||{});
   }
-  async function verifyWrite(sheetName, id, expectedVersion, startedAt, attempt){
+  // Tolerant equality for comparing a submitted field value against what the
+  // server reads back — Sheets can round-trip a number/boolean through a
+  // slightly different JS representation without that being a real mismatch.
+  function sameValue(a, b){
+    if (a === b) return true;
+    if (a == null && b == null) return true;
+    if (a == null || b == null) return false;
+    return String(a) === String(b);
+  }
+  // Resolves to {status:'saved'|'conflict'|'failed', record}. "saved" is only
+  // returned once the re-read confirms both (a) this session made the most
+  // recent change to this record, AND (b) every field that was submitted is
+  // actually present in the authoritative record that came back — not just
+  // that a read happened to succeed.
+  async function verifyWrite(sheetName, id, data, expectedVersion, startedAt, attempt, options){
+    options = options || {};
     await sleep(800);
     var snap;
     try { snap = await apiGetAll(); } catch(e){ snap = null; }
     if (!snap || !snap.ok){
-      if (snap && handleAuthError(snap.error)) return;
-      if (attempt < 4){ setSyncBadge('retrying'); return verifyWrite(sheetName,id,expectedVersion,startedAt,attempt+1); }
-      setSyncBadge('failed'); return;
+      if (snap && handleAuthError(snap.error)) return { status:'failed', record:null };
+      if (attempt < 4){ setSyncBadge('retrying'); return verifyWrite(sheetName,id,data,expectedVersion,startedAt,attempt+1,options); }
+      setSyncBadge('failed'); return { status:'failed', record:null };
     }
     applyRemoteSnapshot(snap);
     var stateKey = STATE_KEY_FOR_SHEET[sheetName];
     var current = state[stateKey] ? state[stateKey][id] : null;
     var mine = current && current.updatedBy === (state.currentUser&&state.currentUser.email) && new Date(current.updatedAt).getTime() >= startedAt - 3000;
-    if (mine){ setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle(); return; }
+    var fieldsMatch = mine && Object.keys(data).every(function(k){ return sameValue(current[k], data[k]); });
+    if (mine && fieldsMatch){
+      setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle();
+      return { status:'saved', record: current };
+    }
     if (current && (current._version||0) > expectedVersion){
       setSyncBadge('conflict');
-      showConflictNotice(sheetName, current);
-      return;
+      if (!options.silent) showConflictNotice(sheetName, current);
+      return { status:'conflict', record: current };
     }
-    if (attempt < 4){ setSyncBadge('retrying'); return verifyWrite(sheetName,id,expectedVersion,startedAt,attempt+1); }
+    if (attempt < 4){ setSyncBadge('retrying'); return verifyWrite(sheetName,id,data,expectedVersion,startedAt,attempt+1,options); }
     setSyncBadge('failed');
+    return { status:'failed', record: current };
   }
   function confirmedDelete(sheetName, id){
     setSyncBadge('saving');
@@ -926,38 +946,36 @@
   // the network) and shows "Saving...". A follow-up authenticated read then
   // confirms the change actually landed on the server before showing
   // "Saved \u2713" — see confirmedWrite/verifyWrite above.
-  function saveContact(id, data){
+  function saveContact(id, data, options){
     var finalId = id || uid();
     var existing = state.contacts[finalId];
     var expectedVersion = existing ? (existing._version||0) : 0;
     var merged = Object.assign({}, existing||{}, data, { id: finalId });
     state.contacts[finalId] = merged;
     persistLocal(); render();
-    confirmedWrite('contacts', finalId, data, expectedVersion);
-    return merged;
+    return confirmedWrite('contacts', finalId, data, expectedVersion, options);
   }
   function deleteContact(id){
     delete state.contacts[id];
     persistLocal(); render();
     confirmedDelete('contacts', id);
   }
-  function saveDeal(id, data){
+  function saveDeal(id, data, options){
     var finalId = id || uid();
     var existing = state.deals[finalId];
     var expectedVersion = existing ? (existing._version||0) : 0;
     var merged = Object.assign({}, existing||{}, data, { id: finalId });
     state.deals[finalId] = merged;
     persistLocal(); render();
-    confirmedWrite('deals', finalId, data, expectedVersion);
-    return merged;
+    return confirmedWrite('deals', finalId, data, expectedVersion, options);
   }
-  function updateDeal(id, patch){
+  function updateDeal(id, patch, options){
     var existing = state.deals[id];
     var expectedVersion = existing ? (existing._version||0) : 0;
     var merged = Object.assign({}, existing||{}, patch, { id: id });
     state.deals[id] = merged;
     persistLocal(); render();
-    confirmedWrite('deals', id, patch, expectedVersion);
+    return confirmedWrite('deals', id, patch, expectedVersion, options);
   }
   function deleteDeal(id){
     delete state.deals[id];
@@ -972,15 +990,14 @@
     persistLocal(); render();
     confirmedWrite('goals', monthKey, data, expectedVersion);
   }
-  function saveTask(id, data){
+  function saveTask(id, data, options){
     var finalId = id || uid();
     var existing = state.tasks[finalId];
     var expectedVersion = existing ? (existing._version||0) : 0;
     var merged = Object.assign({}, existing||{}, data, { id: finalId });
     state.tasks[finalId] = merged;
     persistLocal(); render();
-    confirmedWrite('tasks', finalId, data, expectedVersion);
-    return merged;
+    return confirmedWrite('tasks', finalId, data, expectedVersion, options);
   }
   function deleteTask(id){
     delete state.tasks[id];
@@ -1880,25 +1897,42 @@
         openConfirmModal('Delete this task?', "This can't be undone.", 'Delete', function(){ deleteTask(taskId); });
       });
     }
-    document.getElementById('new-task-form').addEventListener('submit', function(e){
+    document.getElementById('new-task-form').addEventListener('submit', async function(e){
       e.preventDefault();
+      var submitBtn = e.target.querySelector('button[type="submit"]');
       var title = document.getElementById('nt-title').value.trim();
       var dueDate = document.getElementById('nt-due').value;
       var assignedTo = document.getElementById('nt-assigned').value.trim();
       var dealId = document.getElementById('nt-deal').value;
       if (!title) return;
+      if (submitBtn) submitBtn.disabled = true;
+      setModalStatus(null, null);
+      var result;
       if (editing){
-        saveTask(taskId, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, updatedAt: nowIso() });
+        result = await saveTask(taskId, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, updatedAt: nowIso() }, { silent: true });
       } else {
-        saveTask(null, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, done:false, createdAt: nowIso() });
+        result = await saveTask(null, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, done:false, createdAt: nowIso() }, { silent: true });
       }
-      closeModal();
+      if (submitBtn) submitBtn.disabled = false;
+      if (result.status === 'saved'){
+        closeModal();
+      } else if (result.status === 'conflict'){
+        setModalStatus('conflict', 'Someone else updated this task while you were editing. Nothing you\u2019ve entered below has been lost \u2014 click Add task/Save changes again to apply it, or Cancel to review the latest version first.');
+      } else {
+        setModalStatus('failed', 'Not synced \u2014 check your connection and click Save again. Nothing you\u2019ve entered has been lost.');
+      }
     });
   }
 
   // ---------- technician view (mobile field list) ----------
   function renderFieldView(){
-    var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; })).filter(function(d){ return !d.archived; });
+    // Deliberately NOT passing through applySourceFilter here — the
+    // office's referral-source filter has no meaning for "what do I work
+    // on today," and silently hid jobs from technicians when it was set to
+    // anything other than "All sources" (this was the root cause of jobs
+    // disappearing from this page while still showing correctly on
+    // Schedule, which never applied that filter to begin with).
+    var deals = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){ return !d.archived; });
     var todayKey = localDateKey();
     var todays = deals.filter(function(d){ return d.scheduledDate === todayKey; }).sort(function(a,b){ return (a.scheduledTime||'').localeCompare(b.scheduledTime||''); });
     var list = todays.length ? todays : deals.filter(function(d){ return d.stage === 'scheduled'; }).slice(0, 6);
@@ -1909,10 +1943,21 @@
       var contact = state.contacts[d.contactId];
       var phone = contact ? contact.phone : '';
       var address = contact ? contact.address : '';
+      var jt = JOB_TYPES.filter(function(j){ return j.id===d.jobType; })[0];
+      var calLabel = CALIBRATION_TYPES.filter(function(c){ return c.id===d.calibrationType; })[0];
+      var st = stageInfo(d.stage);
+      var metaLine2 = [];
+      if (jt) metaLine2.push(jt.label);
+      if (calLabel && calLabel.id !== 'n_a') metaLine2.push(calLabel.label + ' calibration');
+      if (d.partsStatus && d.partsStatus !== 'Not needed') metaLine2.push('Parts: ' + d.partsStatus);
       var card = el(
         '<div class="tech-card">' +
-          '<div class="t-title">'+esc(d.title||'Untitled job')+'</div>' +
+          '<div class="t-title">'+esc(d.title||'Untitled job')+' <span class="role-badge" style="background:'+st.bgDot+';color:#fff;">'+esc(st.label)+'</span></div>' +
           '<div class="t-meta">'+esc(contact?contact.name:(d.contactName||''))+(d.vehicle?' &middot; '+esc(d.vehicle):'')+(d.scheduledTime?' &middot; '+esc(d.scheduledTime):'')+'</div>' +
+          (metaLine2.length ? '<div class="t-meta">'+esc(metaLine2.join(' \u00b7 '))+'</div>' : '') +
+          (address ? '<div class="t-meta">'+esc(address)+'</div>' : '') +
+          (d.assignedTo ? '<div class="t-meta">Assigned: '+esc(d.assignedTo)+'</div>' : '') +
+          (d.notes ? '<div class="t-meta" style="margin-top:6px;font-style:italic;">'+esc(d.notes)+'</div>' : '') +
           '<div class="tech-actions">' +
             (phone ? '<a class="btn btn-ghost btn-sm" href="tel:'+esc(phone.replace(/[^0-9+]/g,''))+'">Call</a>' : '') +
             (address ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(address)+'" target="_blank" rel="noopener">Directions</a>' : '') +
@@ -2114,13 +2159,7 @@
     var applied = updated && updated.role === patch.role && isActiveFlag(updated.active) === !!patch.active;
     setSyncBadge(applied ? 'idle' : 'conflict');
     renderUsers();
-    if (!applied){
-      openConfirmModal(
-        'Change not applied',
-        'The server did not accept that change. This can happen if it would leave the CRM with no active Administrator, or if the email/role was invalid. The list now shows the current server state.',
-        'OK', function(){}
-      );
-    }
+    return { status: applied ? 'saved' : 'failed' };
   }
   function openUserModal(existingUser){
     var editing = !!existingUser;
@@ -2138,16 +2177,24 @@
     backdrop.hidden = false;
     document.getElementById('um-close').addEventListener('click', closeModal);
     document.getElementById('um-cancel').addEventListener('click', closeModal);
-    document.getElementById('user-form').addEventListener('submit', function(e){
+    document.getElementById('user-form').addEventListener('submit', async function(e){
       e.preventDefault();
+      var submitBtn = e.target.querySelector('button[type="submit"]');
       var email = document.getElementById('um-email').value.trim();
       var name = document.getElementById('um-name').value.trim();
       var role = document.getElementById('um-role').value;
       var activeEl = document.getElementById('um-active');
       var active = activeEl ? (activeEl.value === 'true') : true;
       if (!email) return;
-      closeModal();
-      saveUserRecord(email, { name:name, role:role, active:active });
+      if (submitBtn) submitBtn.disabled = true;
+      setModalStatus(null, null);
+      var result = await saveUserRecord(email, { name:name, role:role, active:active });
+      if (submitBtn) submitBtn.disabled = false;
+      if (result.status === 'saved'){
+        closeModal();
+      } else {
+        setModalStatus('failed', 'That change wasn\u2019t applied \u2014 this can happen if it would leave the CRM with no active Administrator, or if the email/role was invalid. Nothing you\u2019ve entered has been lost; adjust and try again.');
+      }
     });
   }
   document.getElementById('add-user-btn').addEventListener('click', function(){ openUserModal(null); });
@@ -2156,6 +2203,25 @@
   var backdrop = document.getElementById('modal-backdrop');
   var modalBox = document.getElementById('modal-box');
   function closeModal(){ backdrop.hidden = true; modalBox.innerHTML = ''; }
+  // Shows/updates a status line at the top of whatever form is currently
+  // open, without touching any of the form's own fields — this is what lets
+  // a failed or conflicting save tell the user what happened while leaving
+  // everything they've typed exactly as it was, so nothing has to be
+  // re-entered.
+  function setModalStatus(kind, message){
+    var el2 = modalBox.querySelector('.modal-save-status');
+    if (!el2){
+      el2 = document.createElement('div');
+      el2.className = 'modal-save-status';
+      var head = modalBox.querySelector('.modal-head');
+      if (head && head.nextSibling) head.parentNode.insertBefore(el2, head.nextSibling);
+      else modalBox.insertBefore(el2, modalBox.firstChild);
+    }
+    if (!message){ el2.remove(); return; }
+    el2.style.cssText = 'margin:-4px 0 14px;padding:9px 12px;border-radius:8px;font-size:12.5px;'
+      + (kind==='conflict' ? 'background:#FBEFC0;color:#6B5300;' : 'background:#F3C3BC;color:#7A1F12;');
+    el2.textContent = message;
+  }
   function openConfirmModal(title, message, confirmLabel, onConfirm){
     modalBox.innerHTML =
       '<div class="modal-head"><div class="modal-title">'+esc(title)+'</div><button class="modal-close" id="cf-close">&times;</button></div>' +
@@ -2248,8 +2314,9 @@
       var addTaskBtn = document.getElementById('dm-add-task');
       if (addTaskBtn){ addTaskBtn.addEventListener('click', function(){ openTaskModal(null, dealId); }); }
     }
-    document.getElementById('deal-form').addEventListener('submit', function(e){
+    document.getElementById('deal-form').addEventListener('submit', async function(e){
       e.preventDefault();
+      var submitBtn = e.target.querySelector('button[type="submit"]');
       var title = document.getElementById('dm-title').value.trim();
       var vehicle = document.getElementById('dm-vehicle').value.trim();
       var licensePlate = document.getElementById('dm-plate').value.trim();
@@ -2297,20 +2364,38 @@
           }
           if (stage !== 'closed_lost') common.lostReason = '';
         }
-        updateDeal(dealId, common);
-        closeModal();
+        if (submitBtn) submitBtn.disabled = true;
+        setModalStatus(null, null);
+        var result = await updateDeal(dealId, common, { silent: true });
+        if (submitBtn) submitBtn.disabled = false;
+        if (result.status === 'saved'){
+          closeModal();
+        } else if (result.status === 'conflict'){
+          setModalStatus('conflict', 'Someone else updated this job while you were editing. Nothing you\u2019ve entered below has been lost \u2014 click Save changes again to apply it on top of their update, or Cancel to review the latest version first.');
+        } else {
+          setModalStatus('failed', 'Not synced \u2014 check your connection and click Save changes again. Nothing you\u2019ve entered has been lost.');
+        }
       } else {
         var contactName = document.getElementById('dm-contact-name').value.trim();
         var phone = document.getElementById('dm-phone').value.trim();
         var email = document.getElementById('dm-email').value.trim();
         if (!contactName) return;
         var existing = findContactByName(contactName);
-        var proceedWithContactId = function(contactId){
+        var proceedWithContactId = async function(contactId){
           var data = Object.assign({ contactId: contactId, contactName: contactName, createdAt: nowIso(),
             quoteSentAt: stage==='quote_sent' ? nowIso() : null,
             closedAt: (isRealized(stage)||stage==='closed_lost') ? nowIso() : null }, common);
-          saveDeal(null, data);
-          closeModal();
+          if (submitBtn) submitBtn.disabled = true;
+          setModalStatus(null, null);
+          var result = await saveDeal(null, data, { silent: true });
+          if (submitBtn) submitBtn.disabled = false;
+          if (result.status === 'saved'){
+            closeModal();
+          } else if (result.status === 'conflict'){
+            setModalStatus('conflict', 'That didn\u2019t sync as expected. Nothing you\u2019ve entered below has been lost \u2014 click Add opportunity again to retry.');
+          } else {
+            setModalStatus('failed', 'Not synced \u2014 check your connection and click Add opportunity again. Nothing you\u2019ve entered has been lost.');
+          }
         };
         if (existing){ proceedWithContactId(existing.id); }
         else {
@@ -2357,8 +2442,9 @@
         openConfirmModal('Delete this contact?', 'Linked opportunities will keep their info but lose the contact link.', 'Delete', function(){ deleteContact(contactId); });
       });
     }
-    document.getElementById('contact-form').addEventListener('submit', function(e){
+    document.getElementById('contact-form').addEventListener('submit', async function(e){
       e.preventDefault();
+      var submitBtn = e.target.querySelector('button[type="submit"]');
       var data = {
         name: document.getElementById('cm-name').value.trim(),
         accountType: document.getElementById('cm-accounttype').value,
@@ -2373,8 +2459,17 @@
         updatedAt: nowIso()
       };
       if (!data.name) return;
-      saveContact(contactId, data);
-      closeModal();
+      if (submitBtn) submitBtn.disabled = true;
+      setModalStatus(null, null);
+      var result = await saveContact(contactId, data, { silent: true });
+      if (submitBtn) submitBtn.disabled = false;
+      if (result.status === 'saved'){
+        closeModal();
+      } else if (result.status === 'conflict'){
+        setModalStatus('conflict', 'Someone else updated this contact while you were editing. Nothing you\u2019ve entered below has been lost \u2014 click Save again to apply it on top of their update, or Cancel to review the latest version first.');
+      } else {
+        setModalStatus('failed', 'Not synced \u2014 check your connection and click Save again. Nothing you\u2019ve entered has been lost.');
+      }
     });
   }
   // ---------- init ----------
