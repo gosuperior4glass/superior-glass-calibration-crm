@@ -576,7 +576,7 @@
           <div class="field"><label for="goal-leads">New opportunities per month</label><input type="number" min="0" id="goal-leads" required></div>
           <div class="field"><label for="goal-quotes">Quotes sent per month</label><input type="number" min="0" id="goal-quotes" required></div>
           <div class="field"><label for="goal-closed">Jobs completed per month</label><input type="number" min="0" id="goal-closed" required></div>
-          <div class="field"><label for="goal-revenue">Revenue closed per month ($)</label><input type="number" min="0" step="1" id="goal-revenue" required></div>
+          <div class="field"><label for="goal-revenue">Revenue closed per month ($)</label><input type="number" min="0" step="0.01" id="goal-revenue" required></div>
           <button type="submit" class="btn btn-primary">Save goals for <span id="goals-current-month-label"></span></button>
           <span class="save-flash" id="goals-flash">Saved</span>
           <div class="goals-note">Saving here sets the target for the current month onward. Earlier months keep whatever was in effect at the time &mdash; check the Dashboard's month view to see them.</div>
@@ -841,7 +841,8 @@
 
   // ---------- utils ----------
   function el(html){ var t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
-  function fmtMoney(n){ n = Number(n)||0; return '$' + n.toLocaleString('en-US', { maximumFractionDigits: 0 }); }
+  function fmtMoney(n){ n = Number(n)||0; return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  function fmtMoneyPrecise(n){ n = Number(n)||0; return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
   function dealBalance(d){ return Math.max(0, Number(d.finalInvoice||d.quoteAmount||0) - Number(d.amountPaid||0)); }
   function esc(s){ if (s===undefined || s===null) return ''; return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function uid(){ return 'id-' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); }
@@ -1220,7 +1221,7 @@
         var mineQuotes = mine.filter(function(d){ return inRange(d.quoteSentAt, bounds.start, bounds.end); }).length;
         var mineClosed = mine.filter(function(d){ return isRealized(d.stage) && inRange(d.closedAt, bounds.start, bounds.end); });
         var mineRev = mineClosed.reduce(function(s,d){ return s+(Number(d.quoteAmount)||0); }, 0);
-        return '<tr><td>'+esc(name)+'</td><td>'+mineNew+'</td><td>'+mineQuotes+'</td><td>'+mineClosed.length+'</td><td>'+fmtMoney(mineRev)+'</td></tr>';
+        return '<tr><td>'+esc(name)+'</td><td>'+mineNew+'</td><td>'+mineQuotes+'</td><td>'+mineClosed.length+'</td><td>'+fmtMoneyPrecise(mineRev)+'</td></tr>';
       }).join('');
       teamWrap.innerHTML = '<div class="table-scroll"><table class="team-table"><thead><tr><th>Team member</th><th>New</th><th>Quoted</th><th>Closed</th><th>Revenue</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
     }
@@ -1339,13 +1340,13 @@
         if (d.partsStatus && d.partsStatus !== 'Not needed') tags += '<span class="kc-tag">'+esc(d.partsStatus)+'</span>';
         if (d.insuranceAuthorized === 'pending') tags += '<span class="kc-tag">Insurance pending</span>';
         var balance = dealBalance(d);
-        if (balance > 0 && (d.stage === 'job_completed' || isRealized(d.stage))) tags += '<span class="kc-tag" style="background:var(--color-danger);color:#fff;">Balance '+fmtMoney(balance)+'</span>';
+        if (balance > 0 && (d.stage === 'job_completed' || isRealized(d.stage))) tags += '<span class="kc-tag" style="background:var(--color-danger);color:#fff;">Balance '+fmtMoneyPrecise(balance)+'</span>';
         var card = el(
           '<div class="kcard" data-deal="'+d.id+'"'+(d.archived ? ' style="opacity:0.55;"' : '')+'>' +
             '<div class="kc-title">'+esc(d.title || 'Untitled job')+(isStale ? '<span class="stale-badge">STALE</span>' : '')+(d.archived ? '<span class="stale-badge" style="background:var(--color-text-muted);">ARCHIVED</span>' : '')+'</div>' +
             '<div class="kc-contact">'+esc(contact ? contact.name : (d.contactName||'Unknown contact'))+(d.vehicle ? ' &middot; '+esc(d.vehicle) : '')+(d.licensePlate ? ' &middot; '+esc(d.licensePlate) : '')+'</div>' +
             (tags ? '<div class="kc-tags">'+tags+'</div>' : '') +
-            '<div class="kc-foot"><span class="kc-amount">'+(d.quoteAmount ? fmtMoney(d.quoteAmount) : '&mdash;')+'</span><span class="kc-age">'+daysAgo(d.createdAt)+'</span></div>' +
+            '<div class="kc-foot"><span class="kc-amount">'+(d.quoteAmount ? fmtMoneyPrecise(d.quoteAmount) : '&mdash;')+'</span><span class="kc-age">'+daysAgo(d.createdAt)+'</span></div>' +
             (d.assignedTo ? '<div class="kc-assigned">Assigned: '+esc(d.assignedTo)+'</div>' : '') +
             '<select data-stage-for="'+d.id+'"></select>' +
           '</div>'
@@ -1614,7 +1615,7 @@
       priorityList.forEach(function(d){
         var contact = state.contacts[d.contactId];
         var st = stageInfo(d.stage);
-        var why = dealBalance(d) > 0 && unpaid.indexOf(d)!==-1 ? 'Balance '+fmtMoney(dealBalance(d)) : 'Stale quote';
+        var why = dealBalance(d) > 0 && unpaid.indexOf(d)!==-1 ? 'Balance '+fmtMoneyPrecise(dealBalance(d)) : 'Stale quote';
         var row = el('<div class="panel-row" style="cursor:pointer;"><span class="stage-dot" style="background:'+st.color+'"></span><div class="p-main"><div class="p-name">'+esc(d.title||'Untitled job')+'</div><div class="p-meta">'+esc(contact?contact.name:(d.contactName||''))+' &middot; '+esc(why)+'</div></div></div>');
         row.addEventListener('click', function(){ openDealModal(d.id); });
         priorityWrap.appendChild(row);
@@ -1685,8 +1686,8 @@
     var rows = keys.map(function(k){
       var s = bySource[k];
       var winRate = (s.won+s.lost) ? Math.round(s.won/(s.won+s.lost)*100)+'%' : '\u2014';
-      var avgJob = s.won ? fmtMoney(s.revenue/s.won) : '\u2014';
-      return '<tr><td>'+esc(k)+'</td><td>'+s.total+'</td><td>'+s.won+'</td><td>'+s.lost+'</td><td>'+winRate+'</td><td>'+fmtMoney(s.revenue)+'</td><td>'+avgJob+'</td></tr>';
+      var avgJob = s.won ? fmtMoneyPrecise(s.revenue/s.won) : '\u2014';
+      return '<tr><td>'+esc(k)+'</td><td>'+s.total+'</td><td>'+s.won+'</td><td>'+s.lost+'</td><td>'+winRate+'</td><td>'+fmtMoneyPrecise(s.revenue)+'</td><td>'+avgJob+'</td></tr>';
     }).join('');
     wrap.innerHTML = '<div class="table-scroll"><table class="team-table"><thead><tr><th>Source</th><th>Total</th><th>Won</th><th>Lost</th><th>Win rate</th><th>Revenue</th><th>Avg job</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   }
@@ -1744,7 +1745,7 @@
     keys.forEach(function(k){
       var s = bySource[k];
       var winRate = (s.won+s.lost) ? Math.round(s.won/(s.won+s.lost)*100)+'%' : 'N/A';
-      var avgJob = s.won ? Math.round(s.revenue/s.won) : '';
+      var avgJob = s.won ? (s.revenue/s.won).toFixed(2) : '';
       lines.push([k, s.total, s.won, s.lost, winRate, s.revenue, avgJob].map(csvEscape).join(','));
     });
     lines.push('');
@@ -1826,7 +1827,7 @@
       payWrap.innerHTML = '';
       due.forEach(function(d){
         var contact = state.contacts[d.contactId];
-        var row = el('<div class="task-row"><div><div class="t-title">'+esc(d.title||'Untitled job')+'</div><div class="t-meta">'+esc(contact?contact.name:(d.contactName||''))+' &middot; Balance '+fmtMoney(dealBalance(d))+'</div></div></div>');
+        var row = el('<div class="task-row"><div><div class="t-title">'+esc(d.title||'Untitled job')+'</div><div class="t-meta">'+esc(contact?contact.name:(d.contactName||''))+' &middot; Balance '+fmtMoneyPrecise(dealBalance(d))+'</div></div></div>');
         var btn = el('<button class="btn btn-ghost btn-sm">Open</button>');
         btn.addEventListener('click', function(){ openDealModal(d.id); });
         row.appendChild(btn);
@@ -2043,7 +2044,7 @@
     var rows = keys.map(function(k){
       var g = state.goalsHistory[k];
       var label = new Date(k+'-01T00:00:00').toLocaleDateString('en-US',{month:'short', year:'numeric'});
-      return '<tr><td>'+esc(label)+'</td><td>'+g.leadsGoal+'</td><td>'+g.quotesGoal+'</td><td>'+g.closedGoal+'</td><td>'+fmtMoney(g.revenueGoal)+'</td></tr>';
+      return '<tr><td>'+esc(label)+'</td><td>'+g.leadsGoal+'</td><td>'+g.quotesGoal+'</td><td>'+g.closedGoal+'</td><td>'+fmtMoneyPrecise(g.revenueGoal)+'</td></tr>';
     }).join('');
     histWrap.innerHTML = '<div class="table-scroll"><table><thead><tr><th>Effective from</th><th>Opportunities</th><th>Quotes</th><th>Closed</th><th>Revenue</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
   }
@@ -2192,7 +2193,7 @@
           '<div class="form-field full"><label for="dm-title">Job description</label><input id="dm-title" placeholder="e.g. Windshield replacement" value="'+esc(editing ? editing.title : '')+'" required></div>' +
           '<div class="form-field"><label for="dm-vehicle">Vehicle (year / make / model)</label><input id="dm-vehicle" placeholder="e.g. 2021 Toyota Camry" value="'+esc(editing ? editing.vehicle : '')+'"></div>' +
           '<div class="form-field"><label for="dm-plate">License plate</label><input id="dm-plate" placeholder="e.g. ABC-1234" value="'+esc(editing ? editing.licensePlate : '')+'"></div>' +
-          '<div class="form-field"><label for="dm-amount">Quote amount ($)</label><input id="dm-amount" type="number" min="0" step="1" value="'+(editing && editing.quoteAmount ? editing.quoteAmount : '')+'"></div>' +
+          '<div class="form-field"><label for="dm-amount">Quote amount ($)</label><input id="dm-amount" type="number" min="0" step="0.01" value="'+(editing && editing.quoteAmount ? editing.quoteAmount : '')+'"></div>' +
           '<div class="form-field"><label for="dm-jobtype">Job type</label><select id="dm-jobtype">'+JOB_TYPES.map(function(j){ return '<option value="'+j.id+'"'+(editing && editing.jobType===j.id ? ' selected':'')+'>'+esc(j.label)+'</option>'; }).join('')+'</select></div>' +
           '<div class="form-field"><label for="dm-caltype">Calibration type</label><select id="dm-caltype">'+CALIBRATION_TYPES.map(function(c){ return '<option value="'+c.id+'"'+(editing && editing.calibrationType===c.id ? ' selected':'')+'>'+esc(c.label)+'</option>'; }).join('')+'</select></div>' +
           '<div class="form-field"><label for="dm-stage">Stage</label><select id="dm-stage">'+STAGES.map(function(s){ return '<option value="'+s.id+'"'+(editing && editing.stage===s.id ? ' selected' : '')+'>'+esc(s.label)+'</option>'; }).join('')+'</select></div>' +
@@ -2210,9 +2211,9 @@
             '<div class="form-field"><label for="dm-ins-auth">Approval status</label><select id="dm-ins-auth">'+INSURANCE_STATUSES.map(function(s){ return '<option value="'+s.id+'"'+(editing && editing.insuranceAuthorized===s.id ? ' selected':'')+'>'+esc(s.label)+'</option>'; }).join('')+'</select></div>' +
           '</div></details>' +
           '<details class="form-section"><summary>Billing &amp; payment</summary><div class="form-grid">' +
-            '<div class="form-field"><label for="dm-finalinvoice">Final invoice ($)</label><input id="dm-finalinvoice" type="number" min="0" step="1" placeholder="Defaults to quote amount" value="'+(editing && editing.finalInvoice ? editing.finalInvoice : '')+'"></div>' +
-            '<div class="form-field"><label for="dm-amountpaid">Amount paid ($)</label><input id="dm-amountpaid" type="number" min="0" step="1" value="'+(editing && editing.amountPaid ? editing.amountPaid : '')+'"></div>' +
-            (editing ? '<div class="form-field full" style="font-size:12.5px;color:var(--color-text-muted);">Balance due: <strong style="color:var(--color-text);">'+fmtMoney(Math.max(0, Number(editing.finalInvoice||editing.quoteAmount||0) - Number(editing.amountPaid||0)))+'</strong></div>' : '') +
+            '<div class="form-field"><label for="dm-finalinvoice">Final invoice ($)</label><input id="dm-finalinvoice" type="number" min="0" step="0.01" placeholder="Defaults to quote amount" value="'+(editing && editing.finalInvoice ? editing.finalInvoice : '')+'"></div>' +
+            '<div class="form-field"><label for="dm-amountpaid">Amount paid ($)</label><input id="dm-amountpaid" type="number" min="0" step="0.01" value="'+(editing && editing.amountPaid ? editing.amountPaid : '')+'"></div>' +
+            (editing ? '<div class="form-field full" style="font-size:12.5px;color:var(--color-text-muted);">Balance due: <strong style="color:var(--color-text);">'+fmtMoneyPrecise(Math.max(0, Number(editing.finalInvoice||editing.quoteAmount||0) - Number(editing.amountPaid||0)))+'</strong></div>' : '') +
           '</div></details>' +
           '<details class="form-section"><summary>Photos &amp; documents</summary>' +
             '<div class="form-field full"><label for="dm-attachments">Links (one per line &mdash; paste from Google Drive, Photos, etc.)</label><textarea id="dm-attachments" placeholder="https://...">'+esc(editing ? editing.attachmentLinks : '')+'</textarea></div>' +
