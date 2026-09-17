@@ -69,6 +69,9 @@
   .sign-out-link:hover { color: var(--color-sidebar-text-active); }
 
   .login-screen { position:fixed; inset:0; background: var(--color-sidebar-bg); display:flex; align-items:center; justify-content:center; z-index:200; padding:20px; }
+  .login-screen[hidden] {
+  display: none !important;
+}
   .login-card { background: var(--color-surface); border-radius:16px; padding:36px 32px; max-width:360px; width:100%; text-align:center; box-shadow: 0 20px 60px rgba(0,0,0,0.35); }
   .login-title { font-family: var(--font-display); font-weight:700; font-size:19px; margin:0 0 6px; }
   .login-sub { font-size:13px; color: var(--color-text-muted); margin-bottom:22px; }
