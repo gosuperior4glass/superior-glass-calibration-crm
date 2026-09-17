@@ -1926,6 +1926,46 @@
 
   // ---------- technician view (mobile field list) ----------
   function renderFieldView(){
+    // ============ TEMPORARY DIAGNOSTIC — REMOVE AFTER DEBUGGING ============
+    console.log('%cTECH VIEW DIAGNOSTIC', 'font-weight:bold;font-size:13px;');
+    var __allDeals = Object.keys(state.deals).map(function(k){ return state.deals[k]; });
+    var __todayKey = localDateKey();
+    console.log('todayKey (from localDateKey()):', __todayKey);
+    console.log('total deals in state.deals:', __allDeals.length);
+    __allDeals.forEach(function(d){
+      var contact = state.contacts[d.contactId];
+      var archivedPass = !d.archived;
+      var dateMatch = d.scheduledDate === __todayKey;
+      var stagePass = d.stage === 'scheduled';
+      var included = archivedPass && (dateMatch || stagePass);
+      var reason = '';
+      if (!archivedPass) reason = 'excluded at archived filter (d.archived is truthy)';
+      else if (!dateMatch && !stagePass) reason = 'scheduledDate does not match todayKey, AND stage is not the literal string "scheduled"';
+      else if (!included) reason = 'unknown';
+      else reason = 'n/a (included)';
+      console.log({
+        dealId: d.id,
+        title: d.title,
+        contact: contact ? contact.name : (d.contactName || ''),
+        scheduledDate: d.scheduledDate,
+        scheduledDate_typeof: typeof d.scheduledDate,
+        scheduledTime: d.scheduledTime,
+        assignedTo: d.assignedTo,
+        stage: d.stage,
+        archived: d.archived,
+        archived_typeof: typeof d.archived,
+        source: d.source,
+        todayKey: __todayKey,
+        dateMatch: dateMatch,
+        archivedFilterPasses: archivedPass,
+        stageFallbackMatch: stagePass,
+        FINAL: included ? 'INCLUDED' : 'EXCLUDED',
+        REASON: reason
+      });
+    });
+    console.log('%cEND TECH VIEW DIAGNOSTIC', 'font-weight:bold;font-size:13px;');
+    // ============ END TEMPORARY DIAGNOSTIC ============
+
     // Deliberately NOT passing through applySourceFilter here — the
     // office's referral-source filter has no meaning for "what do I work
     // on today," and silently hid jobs from technicians when it was set to
