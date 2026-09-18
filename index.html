@@ -895,7 +895,13 @@
     }
     applyRemoteSnapshot(snap);
     var stateKey = STATE_KEY_FOR_SHEET[sheetName];
-    var current = state[stateKey] ? state[stateKey][id] : null;
+    // Read directly from the just-fetched snapshot, not from state — state
+    // may deliberately hold a protected, not-yet-overwritten local record
+    // for a deal with a pending/queued write (see applyRemoteSnapshot),
+    // and this check must always see the real, authoritative server value
+    // regardless of that protection.
+    var rawList = snap[sheetName] || [];
+    var current = rawList.filter(function(r){ return String(r.id) === String(id); })[0] || (state[stateKey] ? state[stateKey][id] : null);
     var mine = current && current.updatedBy === (state.currentUser&&state.currentUser.email) && new Date(current.updatedAt).getTime() >= startedAt - 3000;
     var fieldsMatch = mine && Object.keys(data).every(function(k){ return sameValue(current[k], data[k]); });
     if (mine && fieldsMatch){
@@ -1078,13 +1084,107 @@
     persistLocal(); render();
     return confirmedWrite('deals', finalId, data, expectedVersion, options);
   }
+  // Per-deal write serialization. Deal X never races itself: while a write
+  // for a given deal id is in flight (POSTed and awaiting POST-write
+  // verification), a further edit to that SAME deal is coalesced into a
+  // queued patch instead of being dispatched immediately with a version
+  // that may not stay valid. A different deal id is completely unaffected —
+  // this is per-record, not a global lock. _version itself is NEVER
+  // predicted anywhere in this logic; every dispatch (including the queued
+  // one) reads expectedVersion fresh from state.deals[id]._version at the
+  // moment it actually sends, which is always the last value confirmed by
+  // the real POST-write verification cycle.
+  var dealWriteInFlight = {};
+  var dealWriteQueue = {};
+  // True only while a queued patch is parked, blocked from dispatching
+  // because the write ahead of it ended ambiguously and reconciliation
+  // hasn't yet succeeded (see dispatchQueuedDealWrite's 'failed' branch and
+  // the poll resume logic below). Distinct from dealWriteInFlight: a blocked
+  // deal has NO active POST in flight, but must still coalesce rather than
+  // dispatch, since there's no confirmed version yet to dispatch against.
+  var dealWriteBlocked = {};
+  // dealId -> merged patch of every field with an edit not yet confirmed by
+  // the server (in-flight write's fields + anything queued behind it).
+  // applyRemoteSnapshot overlays exactly these fields so a poll can't erase
+  // them, while _version and everything else still updates from the server.
+  var dealPendingFields = {};
   function updateDeal(id, patch, options){
     var existing = state.deals[id];
-    var expectedVersion = existing ? (existing._version||0) : 0;
+    // Optimistic field-level update always happens immediately, whether or
+    // not a write is already in flight — the UI stays responsive either way.
     var merged = Object.assign({}, existing||{}, patch, { id: id });
     state.deals[id] = merged;
+    dealPendingFields[id] = Object.assign({}, dealPendingFields[id]||{}, patch);
     persistLocal(); render();
-    return confirmedWrite('deals', id, patch, expectedVersion, options);
+
+    if (dealWriteInFlight[id] || dealWriteBlocked[id]){
+      // Coalesce with anything already queued: same field edited again ->
+      // latest value wins (plain overwrite); different fields -> both kept
+      // (plain merge). This is exactly what Object.assign already does.
+      var priorQueued = dealWriteQueue[id] ? dealWriteQueue[id].patch : {};
+      dealWriteQueue[id] = { patch: Object.assign({}, priorQueued, patch), options: options };
+      return Promise.resolve({ status:'queued' });
+    }
+
+    dealWriteInFlight[id] = true;
+    var expectedVersion = existing ? (existing._version||0) : 0;
+    var sentPatch = patch;
+    return confirmedWrite('deals', id, patch, expectedVersion, options).then(function(result){
+      dealWriteInFlight[id] = false;
+      // This write's own fields are no longer pending, UNLESS a queued
+      // patch also touched them — then the queued value should keep being
+      // shown until IT resolves too.
+      if (dealPendingFields[id]){
+        Object.keys(sentPatch).forEach(function(k){
+          if (!dealWriteQueue[id] || !dealWriteQueue[id].patch.hasOwnProperty(k)) delete dealPendingFields[id][k];
+        });
+        if (Object.keys(dealPendingFields[id]).length === 0) delete dealPendingFields[id];
+      }
+      dispatchQueuedDealWrite(id, result.status, result.record);
+      return result;
+    });
+  }
+  // Runs once the in-flight write for `id` has settled. Decides what to do
+  // with anything queued behind it while it was pending.
+  async function dispatchQueuedDealWrite(id, resultStatus, authoritativeRecord){
+    if (resultStatus === 'conflict'){
+      // A genuine external version conflict — do NOT silently apply any
+      // queued patch over the other person's newer record. The existing
+      // conflict notice already told the user to review it; discard the
+      // queue and stop shielding those fields. Also show the clean
+      // authoritative record immediately rather than leaving a confusing
+      // hybrid (the user's now-abandoned edits mixed with the other
+      // person's version) on screen until the next poll happens to refresh it.
+      delete dealWriteQueue[id];
+      delete dealPendingFields[id];
+      dealWriteBlocked[id] = false;
+      if (authoritativeRecord){ state.deals[id] = authoritativeRecord; persistLocal(); render(); }
+      return;
+    }
+    var queued = dealWriteQueue[id];
+    if (!queued) return;
+    if (resultStatus === 'failed'){
+      // Ambiguous outcome — the write may have actually landed on the
+      // server despite verification not confirming it. Never guess: pull a
+      // fresh authoritative snapshot first. If that reconciliation itself
+      // fails, do NOT dispatch — park the patch (still in dealWriteQueue,
+      // still coalescable by further edits) and let the existing 20-second
+      // poll resume it once a read actually succeeds. Nothing is lost,
+      // and no write is ever sent against a guessed version.
+      var snap = null;
+      try { snap = await apiGetAll(); } catch(e){ /* snap stays null */ }
+      if (!snap || !snap.ok){
+        dealWriteBlocked[id] = true;
+        setSyncBadge('failed');
+        return;
+      }
+      applyRemoteSnapshot(snap);
+    }
+    // Dispatch through the normal path — this reads expectedVersion fresh
+    // from state.deals[id]._version at this moment, same as any other call.
+    delete dealWriteQueue[id];
+    dealWriteBlocked[id] = false;
+    updateDeal(id, queued.patch, queued.options);
   }
   function deleteDeal(id){
     delete state.deals[id];
@@ -1158,7 +1258,19 @@
   function applyRemoteSnapshot(data){
     if (!data) return;
     var contactsMap = {}; (data.contacts||[]).forEach(function(c){ contactsMap[c.id] = c; });
-    var dealsMap = {}; (data.deals||[]).forEach(function(d){ dealsMap[d.id] = d; });
+    // A deal with unconfirmed edits (in flight and/or queued, see
+    // updateDeal) has those SPECIFIC field values overlaid here instead of
+    // being replaced wholesale — this is what stops a background poll (or
+    // any other snapshot application) from visually erasing a change the
+    // user is still waiting to have saved. Critically, this only shields
+    // the pending fields themselves: _version, updatedAt/updatedBy, and
+    // every other field always flow through from the real server snapshot,
+    // so the next write for this deal (including a queued one) always
+    // reads a genuinely fresh, correct version — never a frozen stale one.
+    var dealsMap = {}; (data.deals||[]).forEach(function(d){
+      var pending = dealPendingFields[d.id];
+      dealsMap[d.id] = pending ? Object.assign({}, d, pending) : d;
+    });
     var tasksMap = {}; (data.tasks||[]).forEach(function(t){ tasksMap[t.id] = t; });
     var goalsMap = {}; (data.goals||[]).forEach(function(g){ goalsMap[g.id] = g; });
     var followupsMap = {}; (data.followups||[]).forEach(function(f){ followupsMap[f.id] = f; });
@@ -3140,7 +3252,7 @@
         setModalStatus(null, null);
         var result = await updateDeal(dealId, common, { silent: true });
         if (submitBtn) submitBtn.disabled = false;
-        if (result.status === 'saved'){
+        if (result.status === 'saved' || result.status === 'queued'){
           closeModal();
         } else if (result.status === 'conflict'){
           setModalStatus('conflict', 'Someone else updated this job while you were editing. Nothing you\u2019ve entered below has been lost \u2014 click Save changes again to apply it on top of their update, or Cancel to review the latest version first.');
@@ -3373,6 +3485,19 @@
         state.remoteConnected = true;
         applyRemoteSnapshot(data);
         setSyncBadge('idle');
+        // Resume any deal writes parked by dispatchQueuedDealWrite after an
+        // earlier ambiguous failure — this read just gave state.deals a
+        // genuinely fresh, authoritative _version, so it's now safe to
+        // dispatch whatever was coalesced while parked. No separate timer:
+        // the existing poll cadence is the retry mechanism.
+        Object.keys(dealWriteBlocked).forEach(function(id){
+          if (dealWriteBlocked[id] && dealWriteQueue[id] && !dealWriteInFlight[id]){
+            var queued = dealWriteQueue[id];
+            delete dealWriteQueue[id];
+            dealWriteBlocked[id] = false;
+            updateDeal(id, queued.patch, queued.options);
+          }
+        });
       }).catch(function(){
         state.remoteConnected = false;
         setSyncBadge('local');
