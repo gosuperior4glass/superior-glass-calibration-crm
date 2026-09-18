@@ -229,8 +229,8 @@
 
   .search-row { margin-bottom:16px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
   .search-input { flex:1; min-width:220px; max-width:360px; padding:9px 12px; border-radius:8px; border:1px solid var(--color-border); background: var(--color-surface); color: var(--color-text); font-size:13.5px; }
-  .seg-control { display:flex; background: var(--color-surface-2); border-radius:8px; padding:3px; gap:2px; }
-  .seg-control button { border:none; background:none; padding:6px 12px; border-radius:6px; font-size:12.5px; font-weight:600; color: var(--color-text-muted); cursor:pointer; }
+  .seg-control { display:flex; background: var(--color-surface-2); border-radius:8px; padding:3px; gap:2px; max-width:100%; overflow-x:auto; }
+  .seg-control button { border:none; background:none; padding:6px 12px; border-radius:6px; font-size:12.5px; font-weight:600; color: var(--color-text-muted); cursor:pointer; flex-shrink:0; }
   .seg-control button.active { background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-card); }
   .contact-list { display:flex; flex-direction:column; gap:9px; }
   .contact-row { background: var(--color-surface); border:1px solid var(--color-border); border-radius:9px; padding:13px 16px; display:flex; align-items:center; justify-content:space-between; gap:14px; cursor:pointer; box-shadow: var(--shadow-card); }
@@ -464,6 +464,13 @@
             <h1 class="page-title">Trends</h1>
             <div class="page-sub">Monthly history for your core KPIs<span id="trends-filter-note"></span>.</div>
           </div>
+          <div class="head-actions">
+            <div class="seg-control" id="trends-range">
+              <button data-range="6">6 months</button>
+              <button data-range="12" class="active">12 months</button>
+              <button data-range="all">All time</button>
+            </div>
+          </div>
         </div>
         <div class="kpi-legend">Colors follow the Dashboard's pacing rules: the current month compares to where you should be by today; closed months are green only if the full-month goal was met.</div>
         <div class="trends-grid">
@@ -474,32 +481,57 @@
           <div class="trend-chart-wrap"><div class="trend-chart-title">Average job value</div><div id="trend-avg-job"></div></div>
           <div class="trend-chart-wrap"><div class="trend-chart-title">Win rate</div><div id="trend-win-rate"></div></div>
         </div>
+        <div class="empty-note" style="margin-top:6px;">A monthly "Collected Revenue" trend isn't included here on purpose: the CRM stores each job's total Amount Paid as a single current figure, not a dated history of individual payments, so there's no reliable way to know which calendar month a given dollar was actually collected in \u2014 only how much has been paid on a job as of right now. Adding a monthly trend from that would risk showing a misleading picture rather than a real one.</div>
       </section>
 
       <section class="view" data-view="reports" hidden>
         <div class="page-head">
           <div>
             <h1 class="page-title">Reports</h1>
-            <div class="page-sub">Performance by referral source.</div>
+            <div class="page-sub">What's driving your business results.</div>
           </div>
           <div class="head-actions"><button class="btn btn-ghost" id="export-reports-btn">Export report (CSV)</button></div>
         </div>
         <div class="search-row">
-          <div class="seg-control" id="reports-mode">
-            <button data-mode="alltime" class="active">All-time</button>
-            <button data-mode="monthly">Monthly</button>
-          </div>
-          <div class="month-switch" id="reports-month-switch" style="display:none; margin:0;">
-            <button id="reports-month-prev" aria-label="Previous month">&larr;</button>
-            <div class="month-label" id="reports-month-label">&mdash;</div>
-            <button id="reports-month-next" aria-label="Next month">&rarr;</button>
+          <div class="seg-control" id="reports-range">
+            <button data-range="thismonth">This month</button>
+            <button data-range="lastmonth">Last month</button>
+            <button data-range="ytd">YTD</button>
+            <button data-range="alltime" class="active">All time</button>
+            <button data-range="custom">Custom</button>
           </div>
         </div>
+        <div class="search-row" id="reports-custom-row" style="display:none;">
+          <div class="form-field" style="margin:0;"><label for="reports-custom-from" style="font-size:11.5px;">From date</label><input type="date" id="reports-custom-from"></div>
+          <div class="form-field" style="margin:0;"><label for="reports-custom-to" style="font-size:11.5px;">To date</label><input type="date" id="reports-custom-to"></div>
+          <button class="btn btn-primary btn-sm" id="reports-custom-apply" style="align-self:flex-end;">Apply</button>
+        </div>
+        <div class="page-sub" id="reports-scope-note" style="margin:-6px 0 14px;"></div>
+
         <div class="stat-row" id="reports-stats"></div>
-        <div class="section-label" id="reports-source-label">By referral source</div>
+
+        <div class="section-label">Sales funnel \u2014 Opportunities initiated in selected period</div>
+        <div class="page-sub" style="margin-top:-8px;">Opportunities \u2192 Quotes \u2192 Scheduled \u2192 Job Completed \u2192 Fully Paid</div>
+        <div id="reports-funnel"></div>
+
+        <div class="section-label" style="margin-top:24px;">Performance by service type</div>
+        <div id="reports-service-type"></div>
+
+        <div class="section-label" id="reports-source-label" style="margin-top:24px;">By referral source</div>
         <div id="reports-source"></div>
-        <div class="section-label" id="reports-lost-label" style="margin-top:22px;">Why opportunities were lost</div>
+
+        <div class="section-label" style="margin-top:24px;">Outstanding payments</div>
+        <div class="page-sub" style="margin-top:-8px;">Every job with an unpaid balance right now, regardless of the date range above.</div>
+        <div id="reports-outstanding"></div>
+
+        <div class="section-label" id="reports-lost-label" style="margin-top:24px;">Why opportunities were lost</div>
         <div id="reports-lost-reasons"></div>
+
+        <div class="section-label" style="margin-top:24px;">Opportunities initiated by team</div>
+        <div id="reports-by-creator"></div>
+
+        <div class="section-label" style="margin-top:24px;">Customer mix</div>
+        <div id="reports-customer-mix"></div>
       </section>
 
       <section class="view" data-view="schedule" hidden>
@@ -666,8 +698,10 @@
     remoteConnected: false,
     sourceFilter: 'all',
     showArchived: false,
-    reportsMode: 'alltime',
-    reportsMonthOffset: 0,
+    reportsRange: 'alltime',
+    reportsCustomFrom: '',
+    reportsCustomTo: '',
+    trendsRange: 12,
     taskAssigneeFilter: 'all',
     sessionToken: null,
     sessionExp: 0,
@@ -902,6 +936,32 @@
     if (!iso) return false;
     var t = new Date(iso).getTime();
     return t >= start.getTime() && t < end.getTime();
+  }
+  // Report date-range resolver. All bounds are constructed from LOCAL
+  // calendar dates (new Date(y,m,d) / "YYYY-MM-DDT00:00:00") — never a bare
+  // "new Date(dateString)", which parses as UTC and is exactly what caused
+  // the earlier Invalid Date bug. start:null means "no lower bound".
+  function getReportRange(){
+    var mode = state.reportsRange;
+    var now = new Date();
+    if (mode === 'thismonth') return Object.assign({ label:'This month' }, getMonthBounds(0));
+    if (mode === 'lastmonth') return Object.assign({ label:'Last month' }, getMonthBounds(-1));
+    if (mode === 'ytd'){
+      var start = new Date(now.getFullYear(), 0, 1);
+      var end = new Date(now.getFullYear()+1, 0, 1);
+      return { start:start, end:end, label: now.getFullYear() + ' year to date' };
+    }
+    if (mode === 'custom' && state.reportsCustomFrom && state.reportsCustomTo){
+      var from = new Date(state.reportsCustomFrom + 'T00:00:00');
+      var to = new Date(state.reportsCustomTo + 'T00:00:00');
+      to.setDate(to.getDate() + 1); // make the "to" day inclusive
+      return { start:from, end:to, label: from.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) + ' \u2013 ' + new Date(state.reportsCustomTo+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) };
+    }
+    return { start:null, end:null, label:'All time' };
+  }
+  function inReportRange(range, iso){
+    if (!range.start) return !!iso; // "All time" — just require the date field to exist
+    return inRange(iso, range.start, range.end);
   }
   function getEffectiveGoals(monthKey){
     var keys = Object.keys(state.goalsHistory).filter(function(k){ return k <= monthKey; }).sort();
@@ -1393,7 +1453,11 @@
         patch.closedAt = nowIso(); // newly realized just now
         var invoiceBase = (deal && deal.finalInvoice) || (deal && deal.quoteAmount) || 0;
         if (!deal || !deal.finalInvoice) patch.finalInvoice = invoiceBase;
-        if (!deal || !deal.amountPaid) patch.amountPaid = invoiceBase;
+        // amountPaid is deliberately NOT auto-populated here — entering a
+        // realized stage is a workflow milestone, not proof of payment.
+        // The actual amount the user enters (including $0, or a partial
+        // amount) is preserved as-is; Outstanding Payments and the funnel's
+        // "Fully Paid" step are what determine payment status.
       }
       // else: already realized (e.g. Payment Received -> Customer Follow-Up) — keep the original closedAt and payment info
     } else if (newStage === 'closed_lost'){
@@ -1528,7 +1592,8 @@
       cursor.setMonth(cursor.getMonth() + 1);
       guard++;
     }
-    if (keys.length > 12) keys = keys.slice(keys.length - 12);
+    var cap = state.trendsRange; // 6, 12, or 'all'
+    if (cap !== 'all' && keys.length > cap) keys = keys.slice(keys.length - cap);
     return keys;
   }
   function computeMonthlyMetrics(){
@@ -1566,6 +1631,7 @@
     }).join('') + '</div>';
   }
   function renderTrends(){
+    document.querySelectorAll('#trends-range button').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-range') === String(state.trendsRange)); });
     var note = document.getElementById('trends-filter-note');
     if (note) note.textContent = state.sourceFilter === 'all' ? '' : ' \u2014 showing "'+state.sourceFilter+'" only';
     var metrics = computeMonthlyMetrics();
@@ -1577,6 +1643,13 @@
     renderTrendChart('trend-avg-job', metrics.map(function(m){ return { label:m.label, value:m.avgJobValue, color:'var(--color-accent-2)' }; }), fmtMoney);
     renderTrendChart('trend-win-rate', metrics.map(function(m){ return { label:m.label, value:m.winRate, color:'var(--color-accent-2)' }; }), function(v){ return v+'%'; });
   }
+  document.querySelectorAll('#trends-range button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var r = btn.getAttribute('data-range');
+      state.trendsRange = r === 'all' ? 'all' : Number(r);
+      renderTrends();
+    });
+  });
 
   // ---------- schedule ----------
   function renderSchedule(){
@@ -1653,127 +1726,271 @@
   }
 
   // ---------- reports (all-time, by referral source) ----------
+  // Single source of truth for every number shown on the Reports page and
+  // in its CSV export, so the two can never drift apart.
+  //
+  // Date field used per metric (see Part 15.F of the implementation report):
+  //   - Opportunity counts, Quoted Value, and every "Opportunities"/"initiated"
+  //     column: createdAt (when the opportunity was logged)
+  //   - Jobs Won / Lost, Final Invoiced, Collected, Revenue everywhere,
+  //     Win Rate: closedAt (when the deal was realized or marked lost) —
+  //     independent of createdAt, so a job opened last month and closed this
+  //     month counts as "won" in this month's report, not last month's.
+  //   - Sales funnel's "Quotes" step: quoteSentAt (existence, not a separate
+  //     date-range check) — a reliable stage-transition timestamp.
+  //   - Sales funnel's "Scheduled"/"Job completed" steps: current stage /
+  //     scheduledDate presence — see the in-app caption; these are NOT backed
+  //     by a stored timestamp (no scheduledAt/jobCompletedAt field exists),
+  //     so they're clearly labeled as an estimate, not a confirmed history.
+  //   - Outstanding Payments: unscoped by design — always the live, current
+  //     balance, not limited to the selected period.
+  function computeReportData(){
+    var range = getReportRange();
+    var allDeals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; })).filter(function(d){ return !d.archived; });
+    var cohort = allDeals.filter(function(d){ return inReportRange(range, d.createdAt); });
+    var won = allDeals.filter(function(d){ return isRealized(d.stage) && inReportRange(range, d.closedAt); });
+    var lost = allDeals.filter(function(d){ return d.stage === 'closed_lost' && inReportRange(range, d.closedAt); });
+
+    var quotedValue = cohort.reduce(function(s,d){ return s+(Number(d.quoteAmount)||0); }, 0);
+    var finalInvoiced = won.reduce(function(s,d){ return s + (Number(d.finalInvoice)>0 ? Number(d.finalInvoice) : 0); }, 0);
+    var collected = won.reduce(function(s,d){ return s + (Number(d.amountPaid)||0); }, 0);
+    var outstandingInPeriod = won.reduce(function(s,d){ var fi=Number(d.finalInvoice)||0, ap=Number(d.amountPaid)||0; return s+(fi>ap?(fi-ap):0); }, 0);
+    var winRatePct = (won.length+lost.length) ? Math.round(won.length/(won.length+lost.length)*100) : null;
+
+    var funnel = {
+      opps: cohort.length,
+      quotes: cohort.filter(function(d){ return !!d.quoteSentAt; }).length,
+      scheduled: cohort.filter(function(d){ return !!d.scheduledDate; }).length,
+      completed: cohort.filter(function(d){ return d.stage==='job_completed' || isRealized(d.stage); }).length,
+      // "Fully Paid" — deliberately NOT isRealized(stage). Being in the
+      // Payment Received/Customer Follow-up stage is a workflow milestone,
+      // not proof of actual payment (see amountPaid discussion above this
+      // function) — a partial payment does not count.
+      fullyPaid: cohort.filter(function(d){ return Number(d.finalInvoice)>0 && Number(d.amountPaid)>=Number(d.finalInvoice); }).length
+    };
+
+    var byType = {};
+    JOB_TYPES.forEach(function(jt){ byType[jt.id] = { label: jt.label, total:0, won:0, revenue:0 }; });
+    byType.__none = { label:'Not set', total:0, won:0, revenue:0 };
+    cohort.forEach(function(d){ var k = (d.jobType && byType[d.jobType]) ? d.jobType : '__none'; byType[k].total++; });
+    won.forEach(function(d){ var k = (d.jobType && byType[d.jobType]) ? d.jobType : '__none'; byType[k].won++; byType[k].revenue += Number(d.finalInvoice||d.quoteAmount||0); });
+
+    function bump(map, key){ if (!map[key]) map[key] = { total:0, won:0, lost:0, revenue:0, quoted:0 }; return map[key]; }
+    var bySource = {};
+    cohort.forEach(function(d){ var b = bump(bySource, d.source || 'Not set'); b.total++; b.quoted += Number(d.quoteAmount)||0; });
+    won.forEach(function(d){ var b = bump(bySource, d.source || 'Not set'); b.won++; b.revenue += Number(d.finalInvoice||d.quoteAmount||0); });
+    lost.forEach(function(d){ var b = bump(bySource, d.source || 'Not set'); b.lost++; });
+
+    var byCreator = {};
+    cohort.forEach(function(d){ var b = bump(byCreator, d.createdBy || 'Not set'); b.total++; b.quoted += Number(d.quoteAmount)||0; });
+    won.forEach(function(d){ var b = bump(byCreator, d.createdBy || 'Not set'); b.won++; b.revenue += Number(d.finalInvoice||d.quoteAmount||0); });
+    lost.forEach(function(d){ var b = bump(byCreator, d.createdBy || 'Not set'); b.lost++; });
+
+    var outstandingDeals = allDeals.filter(function(d){ var fi=Number(d.finalInvoice)||0, ap=Number(d.amountPaid)||0; return fi>0 && fi>ap; })
+      .sort(function(a,b){ return new Date(b.closedAt||b.updatedAt||0) - new Date(a.closedAt||a.updatedAt||0); });
+
+    var lostByReason = {};
+    lost.forEach(function(d){ var r = d.lostReason || 'Not set'; if (!lostByReason[r]) lostByReason[r] = { count:0, quoted:0 }; lostByReason[r].count++; lostByReason[r].quoted += Number(d.quoteAmount)||0; });
+
+    function mixKey(d){ var c = state.contacts[d.contactId]; return (c && c.accountType==='fleet') ? 'fleet' : 'individual'; }
+    var mix = { individual: { label:'Individual', total:0, won:0, revenue:0 }, fleet: { label:'Fleet / commercial', total:0, won:0, revenue:0 } };
+    cohort.forEach(function(d){ mix[mixKey(d)].total++; });
+    won.forEach(function(d){ var k = mixKey(d); mix[k].won++; mix[k].revenue += Number(d.finalInvoice||d.quoteAmount||0); });
+
+    return {
+      range:range, cohort:cohort, won:won, lost:lost,
+      quotedValue:quotedValue, finalInvoiced:finalInvoiced, collected:collected, outstandingInPeriod:outstandingInPeriod, winRatePct:winRatePct,
+      funnel:funnel, byType:byType, bySource:bySource, byCreator:byCreator, outstandingDeals:outstandingDeals, lostByReason:lostByReason, mix:mix
+    };
+  }
+
   function renderReports(){
-    var isMonthly = state.reportsMode === 'monthly';
-    document.getElementById('reports-month-switch').style.display = isMonthly ? 'flex' : 'none';
-    document.querySelectorAll('#reports-mode button').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-mode') === state.reportsMode); });
+    document.querySelectorAll('#reports-range button').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-range') === state.reportsRange); });
+    document.getElementById('reports-custom-row').style.display = state.reportsRange === 'custom' ? 'flex' : 'none';
 
-    var allDeals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
-    var deals = allDeals;
-    var scopeLabel = 'All-time';
-    var bounds = null;
-    if (isMonthly){
-      bounds = getMonthBounds(state.reportsMonthOffset);
-      document.getElementById('reports-month-label').textContent = bounds.label;
-      document.getElementById('reports-month-next').disabled = state.reportsMonthOffset >= 0;
-      document.getElementById('reports-month-prev').disabled = state.reportsMonthOffset <= -11;
-      deals = allDeals.filter(function(d){ return inRange(d.createdAt, bounds.start, bounds.end) || inRange(d.closedAt, bounds.start, bounds.end); });
-      scopeLabel = bounds.label;
-    }
-    document.getElementById('reports-source-label').textContent = 'By referral source \u2014 ' + scopeLabel;
-
-    var won = deals.filter(function(d){ return isRealized(d.stage) && (!isMonthly || inRange(d.closedAt, bounds.start, bounds.end)); });
-    var lost = deals.filter(function(d){ return d.stage === 'closed_lost' && (!isMonthly || inRange(d.closedAt, bounds.start, bounds.end)); });
-    var newOpps = isMonthly ? deals.filter(function(d){ return inRange(d.createdAt, bounds.start, bounds.end); }) : deals;
-    var quotedValue = newOpps.reduce(function(s,d){ return s+(Number(d.quoteAmount)||0); }, 0);
-    var collected = won.reduce(function(s,d){ return s+(Number(d.finalInvoice||d.quoteAmount)||0); }, 0);
+    var data = computeReportData();
+    var range = data.range;
+    document.getElementById('reports-scope-note').textContent = 'Showing: ' + range.label + '. Opportunity/team/service/customer counts use each job\u2019s logged date; Won, Lost, and Revenue use the date it closed.';
+    document.getElementById('reports-source-label').textContent = 'By referral source \u2014 ' + range.label;
+    document.getElementById('reports-lost-label').textContent = 'Why opportunities were lost \u2014 ' + range.label;
 
     document.getElementById('reports-stats').innerHTML = [
-      ['Quoted value', fmtMoney(quotedValue), scopeLabel+', all jobs'],
-      ['Collected', fmtMoney(collected), scopeLabel+', paid jobs'],
-      ['Jobs won', won.length, scopeLabel],
-      ['Win rate', (won.length+lost.length) ? Math.round(won.length/(won.length+lost.length)*100)+'%' : '\u2014', scopeLabel]
+      ['Quoted value', fmtMoneyPrecise(data.quotedValue), 'Opportunities logged in period'],
+      ['Final invoiced', fmtMoneyPrecise(data.finalInvoiced), 'Jobs closed in period'],
+      ['Paid to date', fmtMoneyPrecise(data.collected), 'Jobs closed in selected period'],
+      ['Outstanding', fmtMoneyPrecise(data.outstandingInPeriod), 'Invoiced & unpaid, closed in period'],
+      ['Jobs won', data.won.length, 'Closed in period'],
+      ['Win rate', data.winRatePct===null ? '\u2014' : data.winRatePct+'%', 'Closed in period']
     ].map(function(x){ return '<div class="stat-chip"><div class="stat-label">'+esc(x[0])+'</div><div class="stat-val">'+x[1]+'</div><div class="stat-sub">'+esc(x[2])+'</div></div>'; }).join('');
 
-    var bySource = {};
-    deals.forEach(function(d){
-      var key = d.source || 'Not set';
-      if (!bySource[key]) bySource[key] = { total:0, won:0, lost:0, revenue:0 };
-      bySource[key].total++;
-      if (isRealized(d.stage) && (!isMonthly || inRange(d.closedAt, bounds.start, bounds.end))){ bySource[key].won++; bySource[key].revenue += Number(d.finalInvoice||d.quoteAmount||0); }
-      if (d.stage === 'closed_lost' && (!isMonthly || inRange(d.closedAt, bounds.start, bounds.end))) bySource[key].lost++;
-    });
-    var keys = Object.keys(bySource).sort(function(a,b){ return bySource[b].total - bySource[a].total; });
+    var f = data.funnel;
+    var funnelWrap = document.getElementById('reports-funnel');
+    if (f.opps === 0){
+      funnelWrap.innerHTML = '<div class="empty-note">No opportunities logged in this period.</div>';
+    } else {
+      var steps = [
+        { label:'Opportunities', count:f.opps, note:'' },
+        { label:'Quotes', count:f.quotes, note:'' },
+        { label:'Scheduled', count:f.scheduled, note:'current-stage estimate' },
+        { label:'Job completed', count:f.completed, note:'current-stage estimate' },
+        { label:'Fully paid', count:f.fullyPaid, note:'' }
+      ];
+      funnelWrap.innerHTML = steps.map(function(s,i){
+        var pct = f.opps ? Math.round((s.count/f.opps)*100) : 0;
+        var conv = i>0 && steps[i-1].count ? Math.round((s.count/steps[i-1].count)*100)+'% of previous' : '';
+        return '<div class="bar-list-row"><div class="blr-top"><span class="blr-name">'+esc(s.label)+(s.note?' <span style="color:var(--color-text-muted);font-weight:400;">('+esc(s.note)+')</span>':'')+'</span><span class="blr-count">'+s.count+(conv?' \u00b7 '+esc(conv):'')+'</span></div><div class="bar-track"><div class="bar-fill" style="width:'+pct+'%;"></div></div></div>';
+      }).join('') + '<div class="empty-note" style="margin-top:4px;">\u201cScheduled\u201d and \u201cJob completed\u201d reflect each opportunity\u2019s current stage, not a confirmed timeline \u2014 the CRM only timestamps when a job was quoted and when payment was received. A job that skipped a stage is counted at whichever stages it actually has data for.</div>';
+    }
 
-    document.getElementById('reports-lost-label').textContent = 'Why opportunities were lost \u2014 ' + scopeLabel;
-    renderBreakdown('reports-lost-reasons', lost, function(d){ return d.lostReason || 'Not set'; }, 'No lost opportunities in this period.');
+    var typeKeys = Object.keys(data.byType).filter(function(k){ return data.byType[k].total > 0 || data.byType[k].won > 0; }).sort(function(a,b){ return data.byType[b].total - data.byType[a].total; });
+    var typeWrap = document.getElementById('reports-service-type');
+    if (typeKeys.length === 0){ typeWrap.innerHTML = '<div class="empty-note">No opportunities in this period.</div>'; }
+    else {
+      typeWrap.innerHTML = '<div class="table-scroll"><table class="team-table"><thead><tr><th>Service type</th><th>Opportunities</th><th>Jobs won</th><th>Revenue</th><th>Avg job</th></tr></thead><tbody>' +
+        typeKeys.map(function(k){
+          var t = data.byType[k];
+          return '<tr><td>'+esc(t.label)+'</td><td>'+t.total+'</td><td>'+t.won+'</td><td>'+fmtMoneyPrecise(t.revenue)+'</td><td>'+(t.won?fmtMoneyPrecise(t.revenue/t.won):'\u2014')+'</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
 
-    var wrap = document.getElementById('reports-source');
-    if (keys.length === 0){ wrap.innerHTML = '<div class="empty-note">No opportunities in this period.</div>'; return; }
-    var rows = keys.map(function(k){
-      var s = bySource[k];
-      var winRate = (s.won+s.lost) ? Math.round(s.won/(s.won+s.lost)*100)+'%' : '\u2014';
-      var avgJob = s.won ? fmtMoneyPrecise(s.revenue/s.won) : '\u2014';
-      return '<tr><td>'+esc(k)+'</td><td>'+s.total+'</td><td>'+s.won+'</td><td>'+s.lost+'</td><td>'+winRate+'</td><td>'+fmtMoneyPrecise(s.revenue)+'</td><td>'+avgJob+'</td></tr>';
-    }).join('');
-    wrap.innerHTML = '<div class="table-scroll"><table class="team-table"><thead><tr><th>Source</th><th>Total</th><th>Won</th><th>Lost</th><th>Win rate</th><th>Revenue</th><th>Avg job</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+    var sourceKeys = Object.keys(data.bySource).sort(function(a,b){ return data.bySource[b].total - data.bySource[a].total; });
+    var sourceWrap = document.getElementById('reports-source');
+    if (sourceKeys.length === 0){ sourceWrap.innerHTML = '<div class="empty-note">No opportunities in this period.</div>'; }
+    else {
+      sourceWrap.innerHTML = '<div class="table-scroll"><table class="team-table"><thead><tr><th>Source</th><th>Total</th><th>Quoted value</th><th>Won</th><th>Lost</th><th>Win rate</th><th>Revenue</th><th>Avg job</th></tr></thead><tbody>' +
+        sourceKeys.map(function(k){
+          var s = data.bySource[k];
+          var winRate = (s.won+s.lost) ? Math.round(s.won/(s.won+s.lost)*100)+'%' : '\u2014';
+          return '<tr><td>'+esc(k)+'</td><td>'+s.total+'</td><td>'+fmtMoneyPrecise(s.quoted)+'</td><td>'+s.won+'</td><td>'+s.lost+'</td><td>'+winRate+'</td><td>'+fmtMoneyPrecise(s.revenue)+'</td><td>'+(s.won?fmtMoneyPrecise(s.revenue/s.won):'\u2014')+'</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+
+    var outWrap = document.getElementById('reports-outstanding');
+    if (data.outstandingDeals.length === 0){ outWrap.innerHTML = '<div class="empty-note">Nothing outstanding right now.</div>'; }
+    else {
+      outWrap.innerHTML = '<div class="table-scroll"><table class="team-table"><thead><tr><th>Customer</th><th>Job</th><th>Final invoice</th><th>Paid</th><th>Balance due</th><th></th></tr></thead><tbody>' +
+        data.outstandingDeals.map(function(d){
+          var contact = state.contacts[d.contactId];
+          var bal = (Number(d.finalInvoice)||0) - (Number(d.amountPaid)||0);
+          return '<tr><td>'+esc(contact?contact.name:(d.contactName||''))+'</td><td>'+esc(d.title||'Untitled job')+'</td><td>'+fmtMoneyPrecise(d.finalInvoice)+'</td><td>'+fmtMoneyPrecise(d.amountPaid)+'</td><td>'+fmtMoneyPrecise(bal)+'</td><td><button class="btn btn-ghost btn-sm" data-open-deal="'+esc(d.id)+'">Open</button></td></tr>';
+        }).join('') + '</tbody></table></div>';
+      outWrap.querySelectorAll('[data-open-deal]').forEach(function(btn){
+        btn.addEventListener('click', function(){ openDealModal(btn.getAttribute('data-open-deal')); });
+      });
+    }
+
+    var lostKeys = Object.keys(data.lostByReason).sort(function(a,b){ return data.lostByReason[b].count - data.lostByReason[a].count; });
+    var lostWrap = document.getElementById('reports-lost-reasons');
+    if (lostKeys.length === 0){ lostWrap.innerHTML = '<div class="empty-note">No lost opportunities in this period.</div>'; }
+    else {
+      var totalLost = data.lost.length;
+      lostWrap.innerHTML = '<div class="table-scroll"><table class="team-table"><thead><tr><th>Loss reason</th><th>Number lost</th><th>Quoted value lost</th><th>% of lost</th></tr></thead><tbody>' +
+        lostKeys.map(function(r){
+          var l = data.lostByReason[r];
+          return '<tr><td>'+esc(r)+'</td><td>'+l.count+'</td><td>'+fmtMoneyPrecise(l.quoted)+'</td><td>'+(totalLost?Math.round((l.count/totalLost)*100)+'%':'\u2014')+'</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+
+    var creatorKeys = Object.keys(data.byCreator).sort(function(a,b){ return data.byCreator[b].total - data.byCreator[a].total; });
+    var creatorWrap = document.getElementById('reports-by-creator');
+    if (creatorKeys.length === 0){ creatorWrap.innerHTML = '<div class="empty-note">No opportunities in this period.</div>'; }
+    else {
+      creatorWrap.innerHTML = '<div class="table-scroll"><table class="team-table"><thead><tr><th>Team member</th><th>Opportunities initiated</th><th>Quoted value</th><th>Jobs won</th><th>Win rate</th><th>Revenue</th></tr></thead><tbody>' +
+        creatorKeys.map(function(k){
+          var c = data.byCreator[k];
+          var winRate = (c.won+c.lost) ? Math.round(c.won/(c.won+c.lost)*100)+'%' : '\u2014';
+          return '<tr><td>'+esc(k)+'</td><td>'+c.total+'</td><td>'+fmtMoneyPrecise(c.quoted)+'</td><td>'+c.won+'</td><td>'+winRate+'</td><td>'+fmtMoneyPrecise(c.revenue)+'</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+
+    var mixWrap = document.getElementById('reports-customer-mix');
+    var totalMixRevenue = data.mix.individual.revenue + data.mix.fleet.revenue;
+    if (data.mix.individual.total + data.mix.fleet.total === 0){ mixWrap.innerHTML = '<div class="empty-note">No opportunities in this period.</div>'; }
+    else {
+      mixWrap.innerHTML = ['individual','fleet'].map(function(k){
+        var m = data.mix[k];
+        var revPct = totalMixRevenue ? Math.round((m.revenue/totalMixRevenue)*100) : 0;
+        return '<div class="bar-list-row"><div class="blr-top"><span class="blr-name">'+esc(m.label)+'</span><span class="blr-count">'+m.total+' opportunities \u00b7 '+m.won+' won \u00b7 '+fmtMoneyPrecise(m.revenue)+' ('+revPct+'% of revenue)</span></div><div class="bar-track"><div class="bar-fill" style="width:'+revPct+'%;"></div></div></div>';
+      }).join('');
+    }
   }
-  document.querySelectorAll('#reports-mode button').forEach(function(btn){
+  document.querySelectorAll('#reports-range button').forEach(function(btn){
     btn.addEventListener('click', function(){
-      state.reportsMode = btn.getAttribute('data-mode');
-      state.reportsMonthOffset = 0;
+      state.reportsRange = btn.getAttribute('data-range');
       renderReports();
     });
   });
-  document.getElementById('reports-month-prev').addEventListener('click', function(){
-    if (state.reportsMonthOffset > -11){ state.reportsMonthOffset--; renderReports(); }
-  });
-  document.getElementById('reports-month-next').addEventListener('click', function(){
-    if (state.reportsMonthOffset < 0){ state.reportsMonthOffset++; renderReports(); }
+  document.getElementById('reports-custom-apply').addEventListener('click', function(){
+    state.reportsCustomFrom = document.getElementById('reports-custom-from').value;
+    state.reportsCustomTo = document.getElementById('reports-custom-to').value;
+    if (state.reportsCustomFrom && state.reportsCustomTo) renderReports();
   });
   document.getElementById('export-reports-btn').addEventListener('click', function(){ exportReportsCsv(); });
   function exportReportsCsv(){
-    var isMonthly = state.reportsMode === 'monthly';
-    var allDeals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
-    var deals = allDeals;
-    var scopeLabel = 'All-time';
-    var bounds = null;
-    if (isMonthly){
-      bounds = getMonthBounds(state.reportsMonthOffset);
-      deals = allDeals.filter(function(d){ return inRange(d.createdAt, bounds.start, bounds.end) || inRange(d.closedAt, bounds.start, bounds.end); });
-      scopeLabel = bounds.label;
-    }
-    var won = deals.filter(function(d){ return isRealized(d.stage) && (!isMonthly || inRange(d.closedAt, bounds.start, bounds.end)); });
-    var lost = deals.filter(function(d){ return d.stage === 'closed_lost' && (!isMonthly || inRange(d.closedAt, bounds.start, bounds.end)); });
-    var newOpps = isMonthly ? deals.filter(function(d){ return inRange(d.createdAt, bounds.start, bounds.end); }) : deals;
-    var quotedValue = newOpps.reduce(function(s,d){ return s+(Number(d.quoteAmount)||0); }, 0);
-    var collected = won.reduce(function(s,d){ return s+(Number(d.finalInvoice||d.quoteAmount)||0); }, 0);
-    var winRateOverall = (won.length+lost.length) ? Math.round(won.length/(won.length+lost.length)*100)+'%' : 'N/A';
-
-    var bySource = {};
-    deals.forEach(function(d){
-      var key = d.source || 'Not set';
-      if (!bySource[key]) bySource[key] = { total:0, won:0, lost:0, revenue:0 };
-      bySource[key].total++;
-      if (isRealized(d.stage) && (!isMonthly || inRange(d.closedAt, bounds.start, bounds.end))){ bySource[key].won++; bySource[key].revenue += Number(d.finalInvoice||d.quoteAmount||0); }
-      if (d.stage === 'closed_lost' && (!isMonthly || inRange(d.closedAt, bounds.start, bounds.end))) bySource[key].lost++;
-    });
-    var keys = Object.keys(bySource).sort(function(a,b){ return bySource[b].total - bySource[a].total; });
-
+    var data = computeReportData();
     var lines = [];
-    lines.push(csvEscape('Superior Glass and Calibration - Report - ' + scopeLabel));
+    lines.push(csvEscape('Superior Glass and Calibration - Report - ' + data.range.label));
     lines.push('');
-    lines.push(['Quoted value', quotedValue].map(csvEscape).join(','));
-    lines.push(['Collected', collected].map(csvEscape).join(','));
-    lines.push(['Jobs won', won.length].map(csvEscape).join(','));
-    lines.push(['Win rate', winRateOverall].map(csvEscape).join(','));
+    lines.push(['Quoted value', data.quotedValue.toFixed(2)].map(csvEscape).join(','));
+    lines.push(['Final invoiced', data.finalInvoiced.toFixed(2)].map(csvEscape).join(','));
+    lines.push(['Paid to date (jobs closed in period)', data.collected.toFixed(2)].map(csvEscape).join(','));
+    lines.push(['Outstanding (closed in period)', data.outstandingInPeriod.toFixed(2)].map(csvEscape).join(','));
+    lines.push(['Jobs won', data.won.length].map(csvEscape).join(','));
+    lines.push(['Win rate', data.winRatePct===null?'N/A':data.winRatePct+'%'].map(csvEscape).join(','));
     lines.push('');
-    lines.push(['Source','Total','Won','Lost','Win rate','Revenue','Avg job'].map(csvEscape).join(','));
-    keys.forEach(function(k){
-      var s = bySource[k];
+    lines.push(csvEscape('Sales funnel - Opportunities initiated in selected period'));
+    lines.push(['Stage','Count'].map(csvEscape).join(','));
+    lines.push(['Opportunities', data.funnel.opps].map(csvEscape).join(','));
+    lines.push(['Quotes', data.funnel.quotes].map(csvEscape).join(','));
+    lines.push(['Scheduled (current-stage estimate)', data.funnel.scheduled].map(csvEscape).join(','));
+    lines.push(['Job completed (current-stage estimate)', data.funnel.completed].map(csvEscape).join(','));
+    lines.push(['Fully paid (finalInvoice > 0 and amountPaid >= finalInvoice)', data.funnel.fullyPaid].map(csvEscape).join(','));
+    lines.push('');
+    lines.push(csvEscape('By service type'));
+    lines.push(['Service type','Opportunities','Jobs won','Revenue','Avg job'].map(csvEscape).join(','));
+    Object.keys(data.byType).filter(function(k){ return data.byType[k].total>0 || data.byType[k].won>0; }).forEach(function(k){
+      var t = data.byType[k];
+      lines.push([t.label, t.total, t.won, t.revenue.toFixed(2), t.won?(t.revenue/t.won).toFixed(2):''].map(csvEscape).join(','));
+    });
+    lines.push('');
+    lines.push(csvEscape('By referral source'));
+    lines.push(['Source','Total','Quoted value','Won','Lost','Win rate','Revenue','Avg job'].map(csvEscape).join(','));
+    Object.keys(data.bySource).forEach(function(k){
+      var s = data.bySource[k];
       var winRate = (s.won+s.lost) ? Math.round(s.won/(s.won+s.lost)*100)+'%' : 'N/A';
-      var avgJob = s.won ? (s.revenue/s.won).toFixed(2) : '';
-      lines.push([k, s.total, s.won, s.lost, winRate, s.revenue, avgJob].map(csvEscape).join(','));
+      lines.push([k, s.total, s.quoted.toFixed(2), s.won, s.lost, winRate, s.revenue.toFixed(2), s.won?(s.revenue/s.won).toFixed(2):''].map(csvEscape).join(','));
+    });
+    lines.push('');
+    lines.push(csvEscape('Outstanding payments (all-time, not limited to the period above)'));
+    lines.push(['Customer','Job','Final invoice','Paid','Balance due'].map(csvEscape).join(','));
+    data.outstandingDeals.forEach(function(d){
+      var contact = state.contacts[d.contactId];
+      var bal = (Number(d.finalInvoice)||0) - (Number(d.amountPaid)||0);
+      lines.push([contact?contact.name:(d.contactName||''), d.title||'', (Number(d.finalInvoice)||0).toFixed(2), (Number(d.amountPaid)||0).toFixed(2), bal.toFixed(2)].map(csvEscape).join(','));
     });
     lines.push('');
     lines.push(csvEscape('Why opportunities were lost'));
-    lines.push(['Reason','Count'].map(csvEscape).join(','));
-    var lostByReason = {};
-    lost.forEach(function(d){ var r = d.lostReason || 'Not set'; lostByReason[r] = (lostByReason[r]||0)+1; });
-    Object.keys(lostByReason).sort(function(a,b){ return lostByReason[b]-lostByReason[a]; }).forEach(function(r){
-      lines.push([r, lostByReason[r]].map(csvEscape).join(','));
+    lines.push(['Reason','Number lost','Quoted value lost'].map(csvEscape).join(','));
+    Object.keys(data.lostByReason).forEach(function(r){
+      var l = data.lostByReason[r];
+      lines.push([r, l.count, l.quoted.toFixed(2)].map(csvEscape).join(','));
     });
-    var filename = 'superior-glass-report-' + (isMonthly ? bounds.key : 'all-time') + '.csv';
+    lines.push('');
+    lines.push(csvEscape('Opportunities initiated by team'));
+    lines.push(['Team member','Opportunities initiated','Quoted value','Jobs won','Win rate','Revenue'].map(csvEscape).join(','));
+    Object.keys(data.byCreator).forEach(function(k){
+      var c = data.byCreator[k];
+      var winRate = (c.won+c.lost) ? Math.round(c.won/(c.won+c.lost)*100)+'%' : 'N/A';
+      lines.push([k, c.total, c.quoted.toFixed(2), c.won, winRate, c.revenue.toFixed(2)].map(csvEscape).join(','));
+    });
+    lines.push('');
+    lines.push(csvEscape('Customer mix'));
+    lines.push(['Type','Opportunities','Jobs won','Revenue'].map(csvEscape).join(','));
+    ['individual','fleet'].forEach(function(k){
+      var m = data.mix[k];
+      lines.push([m.label, m.total, m.won, m.revenue.toFixed(2)].map(csvEscape).join(','));
+    });
+    var filename = 'superior-glass-report-' + state.reportsRange + (state.reportsRange==='custom' ? ('-'+state.reportsCustomFrom+'-to-'+state.reportsCustomTo) : '') + '.csv';
     downloadCsv(filename, lines.join('\n'));
   }
 
@@ -2358,7 +2575,10 @@
               common.closedAt = nowIso();
               var invoiceBase = editing.finalInvoice || editing.quoteAmount || common.finalInvoice || common.quoteAmount || 0;
               if (!common.finalInvoice) common.finalInvoice = invoiceBase;
-              if (!common.amountPaid) common.amountPaid = invoiceBase;
+              // amountPaid is deliberately NOT auto-populated here — same
+              // reasoning as stageTransitionPatch above. Whatever the user
+              // actually typed in the Amount Paid field (including leaving
+              // it at $0) is what gets saved.
             }
           } else if (stage === 'closed_lost'){
             common.closedAt = nowIso();
