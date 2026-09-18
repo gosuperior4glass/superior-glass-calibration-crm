@@ -383,6 +383,15 @@
           </div>
         </div>
         <div id="db-banner"></div>
+
+        <div class="section-label">Daily goals &mdash; <span id="daily-date-label"></span></div>
+        <div class="kpi-grid" id="daily-kpi-grid"></div>
+
+        <div class="section-label" style="margin-top:22px;">Weekly goals &mdash; <span id="weekly-range-label"></span></div>
+        <div class="kpi-grid" id="weekly-kpi-grid"></div>
+        <div id="monthly-pace-card"></div>
+
+        <div class="section-label" style="margin-top:22px;">Monthly goals</div>
         <div class="month-switch">
           <button id="month-prev" aria-label="Previous month">&larr;</button>
           <div class="month-label" id="month-label">&mdash;</div>
@@ -626,6 +635,27 @@
           <span class="save-flash" id="goals-flash">Saved</span>
           <div class="goals-note">Saving here sets the target for the current month onward. Earlier months keep whatever was in effect at the time &mdash; check the Dashboard's month view to see them.</div>
         </form>
+
+        <div class="section-label" style="margin-top:22px;">Daily activity targets</div>
+        <div class="page-sub" style="margin-top:-8px;">Weekly Revenue is calculated automatically from the Monthly Revenue Goal above &mdash; it isn't set here.</div>
+        <form class="goals-form" id="daily-targets-form">
+          <div class="field"><label for="target-daily-contacts">New contacts per day</label><input type="number" min="0" id="target-daily-contacts" required></div>
+          <div class="field"><label for="target-daily-followups">Follow-ups per day</label><input type="number" min="0" id="target-daily-followups" required></div>
+          <div class="field"><label for="target-daily-quotes">Quotes sent per day</label><input type="number" min="0" id="target-daily-quotes" required></div>
+          <div class="field"><label for="target-daily-scheduled">Jobs scheduled per day</label><input type="number" min="0" id="target-daily-scheduled" required></div>
+          <button type="submit" class="btn btn-primary">Save daily targets</button>
+          <span class="save-flash" id="daily-targets-flash">Saved</span>
+        </form>
+
+        <div class="section-label" style="margin-top:22px;">Weekly activity targets</div>
+        <form class="goals-form" id="weekly-targets-form">
+          <div class="field"><label for="target-weekly-contacts">New contacts per week</label><input type="number" min="0" id="target-weekly-contacts" required></div>
+          <div class="field"><label for="target-weekly-quotes">Quotes sent per week</label><input type="number" min="0" id="target-weekly-quotes" required></div>
+          <div class="field"><label for="target-weekly-scheduled">Jobs scheduled per week</label><input type="number" min="0" id="target-weekly-scheduled" required></div>
+          <div class="field"><label for="target-weekly-completed">Jobs completed per week</label><input type="number" min="0" id="target-weekly-completed" required></div>
+          <button type="submit" class="btn btn-primary">Save weekly targets</button>
+          <span class="save-flash" id="weekly-targets-flash">Saved</span>
+        </form>
         <div class="goal-history">
           <div class="section-label">Goal history</div>
           <div id="goal-history-table"></div>
@@ -679,6 +709,8 @@
   function isRealized(stage){ return REALIZED_STAGES.indexOf(stage) !== -1; }
 
   var SOURCES = ['BNI','Chamber of Commerce','Door knocking','Event / fair','Fleet / commercial partner','Google / search','Insurance referral','Repeat customer','Word of mouth','Other'];
+  var FOLLOWUP_TYPES = ['Phone', 'Text', 'Email', 'Customer status', 'Quote follow-up', 'Insurance follow-up', 'Scheduling follow-up', 'Other'];
+  var DEFAULT_DAILY_WEEKLY_TARGETS = { newContactsDaily:3, followupsDaily:5, quotesSentDaily:2, jobsScheduledDaily:2, newContactsWeekly:15, quotesSentWeekly:10, jobsScheduledWeekly:8, jobsCompletedWeekly:6 };
   var JOB_TYPES = [ {id:'full_windshield', label:'Full Windshield Replacement'}, {id:'adas_calibration', label:'ADAS Calibration'}, {id:'chip_repair', label:'Chip Repair'}, {id:'wiper_replacement', label:'Wiper Replacement'} ];
   var CALIBRATION_TYPES = [ {id:'n_a', label:'N/A'}, {id:'static', label:'Static'}, {id:'dynamic', label:'Dynamic'}, {id:'both', label:'Static + dynamic'} ];
   var LOST_REASONS = ['Price','Timing','Went with someone else','No response','No building','Other'];
@@ -704,6 +736,9 @@
     contacts: {},
     deals: {},
     tasks: {},
+    followups: {},
+    metaRecords: {},
+    dailyWeeklyTargets: null, // populated from the meta sheet once loaded; DEFAULT_DAILY_WEEKLY_TARGETS used until then
     goalsHistory: {},   // monthKey -> {leadsGoal,quotesGoal,closedGoal,revenueGoal,updatedAt}
     monthOffset: 0,
     contactSearch: '',
@@ -737,7 +772,7 @@
   var CLIENT_ID = '632947276461-4k1j3boj2cjif948kn53da71et6s70kk.apps.googleusercontent.com';
   var SYNC_POLL_MS = 20000;
   var jsonpCounter = 0;
-  var STATE_KEY_FOR_SHEET = { contacts:'contacts', deals:'deals', tasks:'tasks', goals:'goalsHistory' };
+  var STATE_KEY_FOR_SHEET = { contacts:'contacts', deals:'deals', tasks:'tasks', goals:'goalsHistory', followups:'followups', meta:'metaRecords' };
 
   function scriptConfigured(){
     return !!SCRIPT_URL && SCRIPT_URL.indexOf('PASTE_YOUR') === -1 && SCRIPT_URL.indexOf('http') === 0;
@@ -1073,13 +1108,30 @@
     persistLocal(); render();
     return confirmedWrite('tasks', finalId, data, expectedVersion, options);
   }
+  function saveFollowup(data, options){
+    var finalId = uid();
+    var merged = Object.assign({}, data, { id: finalId });
+    state.followups[finalId] = merged;
+    persistLocal();
+    return confirmedWrite('followups', finalId, data, 0, options);
+  }
+  function saveDailyWeeklyTargets(data, options){
+    var existing = state.metaRecords ? state.metaRecords['dailyWeeklyTargets'] : null;
+    var expectedVersion = existing ? (existing._version||0) : 0;
+    var merged = Object.assign({}, DEFAULT_DAILY_WEEKLY_TARGETS, existing||{}, data, { id:'dailyWeeklyTargets' });
+    state.dailyWeeklyTargets = merged;
+    if (!state.metaRecords) state.metaRecords = {};
+    state.metaRecords['dailyWeeklyTargets'] = merged;
+    persistLocal(); render();
+    return confirmedWrite('meta', 'dailyWeeklyTargets', data, expectedVersion, options);
+  }
   function deleteTask(id){
     delete state.tasks[id];
     persistLocal(); render();
     confirmedDelete('tasks', id);
   }
-  function flashSaved(){
-    var flash = document.getElementById('goals-flash');
+  function flashSaved(elId){
+    var flash = document.getElementById(elId || 'goals-flash');
     if (flash){ flash.classList.add('show'); setTimeout(function(){ flash.classList.remove('show'); }, 1600); }
   }
   // Local storage here is purely a same-device cache for instant repaint on
@@ -1109,10 +1161,20 @@
     var dealsMap = {}; (data.deals||[]).forEach(function(d){ dealsMap[d.id] = d; });
     var tasksMap = {}; (data.tasks||[]).forEach(function(t){ tasksMap[t.id] = t; });
     var goalsMap = {}; (data.goals||[]).forEach(function(g){ goalsMap[g.id] = g; });
+    var followupsMap = {}; (data.followups||[]).forEach(function(f){ followupsMap[f.id] = f; });
     state.contacts = contactsMap;
     state.deals = dealsMap;
     state.tasks = tasksMap;
+    state.followups = followupsMap;
     if (Object.keys(goalsMap).length) state.goalsHistory = goalsMap;
+    var metaMap = {}; (data.meta||[]).forEach(function(m){ metaMap[m.id] = m; });
+    state.metaRecords = metaMap;
+    // Daily/Weekly activity targets reuse the existing generic "meta" sheet
+    // (id/json/updatedAt) rather than adding new columns to Monthly Goals —
+    // this is a single current-settings record, not historical time-series
+    // data, so it doesn't belong in the same per-month rows Monthly uses.
+    var targetsMeta = metaMap['dailyWeeklyTargets'];
+    if (targetsMeta) state.dailyWeeklyTargets = Object.assign({}, DEFAULT_DAILY_WEEKLY_TARGETS, targetsMeta);
     persistLocal();
     render();
   }
@@ -1152,8 +1214,175 @@
     } else { b.innerHTML = ''; }
   }
 
+  // ---------- daily / weekly goals ----------
+  // Daily = the CRM's local calendar day (midnight to midnight). Weekly =
+  // Sunday through Saturday, local time. Both are always "the current
+  // period" — there's no navigation for these, unlike Monthly.
+  function weekBounds(){
+    var now = new Date();
+    var day = now.getDay(); // 0 = Sunday
+    var start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - day);
+    var end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
+    return { start:start, end:end };
+  }
+  function computeDailyMetrics(){
+    var dayStart = new Date(); dayStart.setHours(0,0,0,0);
+    var dayEnd = new Date(dayStart.getTime() + 86400000);
+    var contacts = Object.keys(state.contacts).map(function(k){ return state.contacts[k]; });
+    var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
+    var followups = Object.keys(state.followups).map(function(k){ return state.followups[k]; });
+    return {
+      newContacts: contacts.filter(function(c){ return inRange(c.createdAt, dayStart, dayEnd); }).length,
+      followups: followups.filter(function(f){ return inRange(f.loggedAt, dayStart, dayEnd); }).length,
+      quotesSent: deals.filter(function(d){ return inRange(d.quoteSentAt, dayStart, dayEnd); }).length,
+      jobsScheduled: deals.filter(function(d){ return inRange(d.scheduledAt, dayStart, dayEnd); }).length
+    };
+  }
+  function computeWeeklyMetrics(){
+    var wb = weekBounds();
+    var contacts = Object.keys(state.contacts).map(function(k){ return state.contacts[k]; });
+    var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
+    // Revenue: same field (quoteAmount) and same event (closedAt, isRealized)
+    // already used by this Dashboard's own Monthly revenue card just below —
+    // deliberately NOT the finalInvoice-based definition Reports uses, to
+    // stay consistent with the Monthly card this section sits beside.
+    var closedWon = deals.filter(function(d){ return isRealized(d.stage) && inRange(d.closedAt, wb.start, wb.end); });
+    return {
+      newContacts: contacts.filter(function(c){ return inRange(c.createdAt, wb.start, wb.end); }).length,
+      quotesSent: deals.filter(function(d){ return inRange(d.quoteSentAt, wb.start, wb.end); }).length,
+      jobsScheduled: deals.filter(function(d){ return inRange(d.scheduledAt, wb.start, wb.end); }).length,
+      jobsCompleted: deals.filter(function(d){ return inRange(d.jobCompletedAt, wb.start, wb.end); }).length,
+      revenue: closedWon.reduce(function(s,d){ return s + (Number(d.quoteAmount)||0); }, 0)
+    };
+  }
+  // Daily status is straight achievement against the full daily target —
+  // never pace-adjusted by time-of-day, so it can't show green before the
+  // actual goal is hit. Monthly's own computeMonthlyStatus() below is
+  // untouched and uses its own, separate pace-adjusted logic. Daily/Weekly
+  // both use the same 70%/100% thresholds (red/yellow/green) approved for
+  // this feature — separate from Monthly's own thresholds.
+  function computeActivityStatus(actual, target){
+    if (!target || target <= 0) return null;
+    var pct = (actual / target) * 100;
+    if (pct < 70) return 'red';
+    if (pct < 100) return 'yellow';
+    return 'green';
+  }
+  // Weekly expected-to-date advances only across the Mon\u2013Fri workweek —
+  // the reporting period is still Sun\u2013Sat and weekend activity still
+  // counts toward the actual total (see computeWeeklyMetrics), it just
+  // doesn't push the expected-to-date bar past Friday's 100%.
+  function weeklyExpectedFraction(now){
+    var day = now.getDay(); // 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Fri,6=Sat
+    var map = { 0:0, 1:0.20, 2:0.40, 3:0.60, 4:0.80, 5:1.00, 6:1.00 };
+    return map[day];
+  }
+  function computeWeeklyPaceStatus(actual, target, expectedFraction){
+    if (!target || target <= 0) return null;
+    var expected = target * expectedFraction;
+    if (expected <= 0) return null; // Sunday — nothing expected yet; no invented status
+    var pct = (actual / expected) * 100;
+    if (pct < 70) return 'red';
+    if (pct < 100) return 'yellow';
+    return 'green';
+  }
+  function activityStatusLabel(status){
+    if (status === 'green') return 'On pace';
+    if (status === 'yellow') return 'Close to pace';
+    if (status === 'red') return 'Behind pace';
+    return '';
+  }
+  function buildActivityKpiCard(label, actual, target, status, fmt){
+    fmt = fmt || function(n){ return n; };
+    var pct = target > 0 ? Math.min(100, Math.round((actual / target) * 100)) : 0;
+    var statusClass = status ? ' status-'+status : '';
+    var barColor = (status === 'yellow') ? 'var(--color-accent-ink)' : (status ? '#fff' : 'var(--color-accent)');
+    var statusLabel = activityStatusLabel(status);
+    return '<div class="kpi-card'+statusClass+'">' +
+      '<div class="kpi-label">'+esc(label)+'</div>' +
+      '<div class="kpi-num-row"><span class="kpi-actual">'+fmt(actual)+'</span><span class="kpi-goal">of '+fmt(target)+' target</span></div>' +
+      '<div class="kpi-bar-track"><div class="kpi-bar-fill" style="width:'+pct+'%;background:'+barColor+';"></div></div>' +
+      '<div class="kpi-pct">'+pct+'% of target'+(statusLabel ? ' &middot; '+esc(statusLabel) : '')+'</div>' +
+    '</div>';
+  }
+  function renderDailyGoals(){
+    document.getElementById('daily-date-label').textContent = new Date().toLocaleDateString('en-US', { weekday:'long', month:'short', day:'numeric' });
+    var m = computeDailyMetrics();
+    var t = Object.assign({}, DEFAULT_DAILY_WEEKLY_TARGETS, state.dailyWeeklyTargets || {});
+    var now = new Date();
+    var elapsedFraction = (now.getHours()*3600 + now.getMinutes()*60 + now.getSeconds()) / 86400;
+    var cards = [
+      ['New contacts', m.newContacts, t.newContactsDaily],
+      ['Follow-ups', m.followups, t.followupsDaily],
+      ['Quotes sent', m.quotesSent, t.quotesSentDaily],
+      ['Jobs scheduled', m.jobsScheduled, t.jobsScheduledDaily]
+    ];
+    document.getElementById('daily-kpi-grid').innerHTML = cards.map(function(c){
+      return buildActivityKpiCard(c[0], c[1], c[2], computeActivityStatus(c[1], c[2], elapsedFraction));
+    }).join('');
+  }
+  function renderWeeklyGoals(){
+    var wb = weekBounds();
+    var lastDay = new Date(wb.end.getTime() - 1);
+    document.getElementById('weekly-range-label').textContent = wb.start.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' \u2013 ' + lastDay.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    var m = computeWeeklyMetrics();
+    var t = Object.assign({}, DEFAULT_DAILY_WEEKLY_TARGETS, state.dailyWeeklyTargets || {});
+    var now = new Date();
+    var weeklyExpected = weeklyExpectedFraction(now);
+
+    // Weekly Revenue target: monthlyRevenueGoal \u00d7 12/52 — a flat,
+    // consistent weekly figure derived from the current month's Monthly
+    // Revenue Goal. Deliberately NOT day-overlap-prorated: Weekly actual
+    // always counts the full Sun\u2013Sat week regardless of month boundary,
+    // so the target needs to be equally consistent rather than shrinking
+    // for weeks that cross into a different month.
+    var monthBounds = getMonthBounds(0);
+    var monthKey = monthKeyOf(new Date());
+    var monthlyGoals = getEffectiveGoals(monthKey) || { revenueGoal:0 };
+    var totalDaysInMonth = Math.round((monthBounds.end - monthBounds.start) / 86400000);
+    var weeklyRevenueTarget = (monthlyGoals.revenueGoal||0) * 12 / 52;
+
+    var cards = [
+      ['New contacts', m.newContacts, t.newContactsWeekly],
+      ['Quotes sent', m.quotesSent, t.quotesSentWeekly],
+      ['Jobs scheduled', m.jobsScheduled, t.jobsScheduledWeekly],
+      ['Jobs completed', m.jobsCompleted, t.jobsCompletedWeekly]
+    ];
+    var html = cards.map(function(c){
+      return buildActivityKpiCard(c[0], c[1], c[2], computeWeeklyPaceStatus(c[1], c[2], weeklyExpected));
+    }).join('');
+    html += buildActivityKpiCard('Revenue', m.revenue, weeklyRevenueTarget, computeWeeklyPaceStatus(m.revenue, weeklyRevenueTarget, weeklyExpected), fmtMoneyPrecise);
+    document.getElementById('weekly-kpi-grid').innerHTML = html;
+
+    // Monthly pace — always the REAL current month, independent of
+    // whatever month the Monthly section below might be navigated to.
+    var monthRevenue = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }))
+      .filter(function(d){ return isRealized(d.stage) && inRange(d.closedAt, monthBounds.start, monthBounds.end); })
+      .reduce(function(s,d){ return s + (Number(d.quoteAmount)||0); }, 0);
+    var daysElapsed = Math.max(1, Math.min(totalDaysInMonth, new Date().getDate()));
+    var expectedByToday = (monthlyGoals.revenueGoal||0) * (daysElapsed / totalDaysInMonth);
+    var paceStat = computeMonthlyStatus(monthKey, monthRevenue, monthlyGoals.revenueGoal);
+    var pacePct = expectedByToday > 0 ? Math.round((monthRevenue/expectedByToday)*1000)/10 : null;
+    var paceEl = document.getElementById('monthly-pace-card');
+    if (!monthlyGoals.revenueGoal){
+      paceEl.innerHTML = '<div class="empty-note">Set a Monthly Revenue Goal to see pace.</div>';
+    } else {
+      var pc = paceStat === 'green' ? 'var(--color-success)' : paceStat === 'yellow' ? 'var(--color-warn)' : paceStat === 'red' ? 'var(--color-danger)' : 'var(--color-border)';
+      paceEl.innerHTML =
+        '<div class="kpi-card" style="border-left:4px solid '+pc+';">' +
+          '<div class="kpi-label">Monthly pace &mdash; on track for the Revenue Goal?</div>' +
+          '<div class="t-meta">Monthly Revenue Goal: '+fmtMoneyPrecise(monthlyGoals.revenueGoal)+'</div>' +
+          '<div class="t-meta">Current: '+fmtMoneyPrecise(monthRevenue)+'</div>' +
+          '<div class="t-meta">Expected by today: '+fmtMoneyPrecise(expectedByToday)+'</div>' +
+          '<div class="kpi-pct" style="margin-top:6px;">Pace: '+(pacePct===null?'\u2014':pacePct+'%')+' of target pace &middot; '+esc(activityStatusLabel(paceStat)||'\u2014')+'</div>' +
+        '</div>';
+    }
+  }
+
   // ---------- dashboard ----------
   function renderDashboard(){
+    renderDailyGoals();
+    renderWeeklyGoals();
     var bounds = getMonthBounds(state.monthOffset);
     document.getElementById('month-label').textContent = bounds.label;
     document.getElementById('month-today').style.visibility = state.monthOffset === 0 ? 'hidden' : 'visible';
@@ -1461,6 +1690,24 @@
       patch.quoteSentAt = nowIso();
     } else if (newStage === 'opportunity' || newStage === 'hot_lead'){
       patch.quoteSentAt = null; // moved back before the quote stage — no longer counts as quoted
+    }
+    // scheduledAt records WHEN the team actually scheduled the job (the
+    // event), not the appointment date itself (scheduledDate, a separate
+    // field the user can freely edit without affecting this). Only set on
+    // first entry into Scheduled; preserved if the job moves forward from
+    // there; cleared only if it moves back before scheduling ever happened.
+    if (newStage === 'scheduled' && oldStage !== 'scheduled'){
+      patch.scheduledAt = nowIso();
+    } else if (newStage === 'opportunity' || newStage === 'hot_lead' || newStage === 'quote_sent'){
+      patch.scheduledAt = null;
+    }
+    // jobCompletedAt: same pattern — set once on first entry into Job
+    // Completed, preserved on forward movement, cleared if the job is moved
+    // back to any stage before completion (including back to Scheduled).
+    if (newStage === 'job_completed' && oldStage !== 'job_completed'){
+      patch.jobCompletedAt = nowIso();
+    } else if (newStage === 'opportunity' || newStage === 'hot_lead' || newStage === 'quote_sent' || newStage === 'scheduled'){
+      patch.jobCompletedAt = null;
     }
     if (isRealized(newStage)){
       if (!isRealized(oldStage)){
@@ -2254,6 +2501,36 @@
       renderOperations();
     }
   }
+  // A follow-up in a couple of clicks: pick a type, optionally add a note,
+  // save. loggedBy/loggedAt are server-controlled (see handleSaveFollowup),
+  // so nothing here needs to prove who's logging it or when — that's the
+  // backend's job. contactId/dealId link it to whichever record it was
+  // opened from (either may be null, but not both).
+  function openLogFollowupModal(contactId, dealId){
+    modalBox.innerHTML =
+      '<div class="modal-head"><div class="modal-title">Log follow-up</div><button class="modal-close" id="lf-close">&times;</button></div>' +
+      '<form id="log-followup-form">' +
+        '<div class="form-field full"><label for="lf-type">Type</label><select id="lf-type">' + FOLLOWUP_TYPES.map(function(t){ return '<option value="'+esc(t)+'">'+esc(t)+'</option>'; }).join('') + '</select></div>' +
+        '<div class="form-field full"><label for="lf-note">Note (optional)</label><textarea id="lf-note" placeholder="e.g. Called customer \u2014 waiting on insurance approval."></textarea></div>' +
+        '<div class="modal-actions"><span></span><div class="right"><button type="button" class="btn btn-ghost" id="lf-cancel">Cancel</button><button type="submit" class="btn btn-primary">Log follow-up</button></div></div>' +
+      '</form>';
+    backdrop.hidden = false;
+    document.getElementById('lf-close').addEventListener('click', closeModal);
+    document.getElementById('lf-cancel').addEventListener('click', closeModal);
+    document.getElementById('log-followup-form').addEventListener('submit', async function(e){
+      e.preventDefault();
+      var submitBtn = e.target.querySelector('button[type="submit"]');
+      var type = document.getElementById('lf-type').value;
+      var note = document.getElementById('lf-note').value.trim();
+      if (submitBtn) submitBtn.disabled = true;
+      setModalStatus(null, null);
+      var result = await saveFollowup({ contactId: contactId||null, dealId: dealId||null, type: type, note: note }, { silent: true });
+      if (submitBtn) submitBtn.disabled = false;
+      if (result.status === 'saved'){ closeModal(); }
+      else if (result.status === 'conflict'){ setModalStatus('conflict', 'That didn\u2019t sync as expected. Nothing has been lost \u2014 click Log follow-up again to retry.'); }
+      else { setModalStatus('failed', 'Not synced \u2014 check your connection and click Log follow-up again. Nothing has been lost.'); }
+    });
+  }
   function openTaskNoteModal(taskId){
     var t = state.tasks[taskId];
     if (!t) return;
@@ -2519,6 +2796,16 @@
     document.getElementById('goal-revenue').value = effective.revenueGoal;
     document.getElementById('goals-current-month-label').textContent = new Date().toLocaleDateString('en-US',{month:'long', year:'numeric'});
 
+    var t = Object.assign({}, DEFAULT_DAILY_WEEKLY_TARGETS, state.dailyWeeklyTargets || {});
+    document.getElementById('target-daily-contacts').value = t.newContactsDaily;
+    document.getElementById('target-daily-followups').value = t.followupsDaily;
+    document.getElementById('target-daily-quotes').value = t.quotesSentDaily;
+    document.getElementById('target-daily-scheduled').value = t.jobsScheduledDaily;
+    document.getElementById('target-weekly-contacts').value = t.newContactsWeekly;
+    document.getElementById('target-weekly-quotes').value = t.quotesSentWeekly;
+    document.getElementById('target-weekly-scheduled').value = t.jobsScheduledWeekly;
+    document.getElementById('target-weekly-completed').value = t.jobsCompletedWeekly;
+
     var histWrap = document.getElementById('goal-history-table');
     var keys = Object.keys(state.goalsHistory).sort().reverse();
     if (keys.length === 0){ histWrap.innerHTML = '<div class="empty-note">No goals saved yet.</div>'; return; }
@@ -2539,6 +2826,26 @@
       revenueGoal: Number(document.getElementById('goal-revenue').value)||0,
       updatedAt: nowIso()
     });
+  });
+  document.getElementById('daily-targets-form').addEventListener('submit', async function(e){
+    e.preventDefault();
+    var result = await saveDailyWeeklyTargets({
+      newContactsDaily: Number(document.getElementById('target-daily-contacts').value)||0,
+      followupsDaily: Number(document.getElementById('target-daily-followups').value)||0,
+      quotesSentDaily: Number(document.getElementById('target-daily-quotes').value)||0,
+      jobsScheduledDaily: Number(document.getElementById('target-daily-scheduled').value)||0
+    });
+    if (result.status === 'saved') flashSaved('daily-targets-flash');
+  });
+  document.getElementById('weekly-targets-form').addEventListener('submit', async function(e){
+    e.preventDefault();
+    var result = await saveDailyWeeklyTargets({
+      newContactsWeekly: Number(document.getElementById('target-weekly-contacts').value)||0,
+      quotesSentWeekly: Number(document.getElementById('target-weekly-quotes').value)||0,
+      jobsScheduledWeekly: Number(document.getElementById('target-weekly-scheduled').value)||0,
+      jobsCompletedWeekly: Number(document.getElementById('target-weekly-completed').value)||0
+    });
+    if (result.status === 'saved') flashSaved('weekly-targets-flash');
   });
 
   // ---------- users (Admin only) ----------
@@ -2743,6 +3050,7 @@
             return '<div style="font-size:12.5px;padding:4px 0;">&bull; '+esc(t.title)+(t.assignedTo?' <span style="color:var(--color-text-muted);">('+esc(t.assignedTo)+')</span>':'')+'</div>';
           }).join('') +
           '<button type="button" class="btn btn-ghost btn-sm" id="dm-add-task" style="margin-top:6px;">+ Add task for this job</button></div>' : '') +
+        (editing ? '<div class="review-btn-row"><label style="display:block;font-size:12px;font-weight:600;color:var(--color-text-muted);margin-bottom:6px;">Follow-up activity</label><button type="button" class="btn btn-ghost btn-sm" id="dm-log-followup">+ Log follow-up</button></div>' : '') +
         '<div class="modal-actions">' +
           (editing ? '<button type="button" class="btn btn-danger btn-sm" id="dm-delete">Delete</button>' : '<span></span>') +
           '<div class="right"><button type="button" class="btn btn-ghost" id="dm-cancel">Cancel</button><button type="submit" class="btn btn-primary">'+(editing ? 'Save changes' : 'Add opportunity')+'</button></div>' +
@@ -2762,6 +3070,8 @@
       if (archiveBtn){ archiveBtn.addEventListener('click', function(){ updateDeal(dealId, { archived: !editing.archived }); closeModal(); }); }
       var addTaskBtn = document.getElementById('dm-add-task');
       if (addTaskBtn){ addTaskBtn.addEventListener('click', function(){ openTaskModal(null, dealId); }); }
+      var logFollowupBtn = document.getElementById('dm-log-followup');
+      if (logFollowupBtn){ logFollowupBtn.addEventListener('click', function(){ openLogFollowupModal(editing.contactId||null, dealId); }); }
     }
     document.getElementById('deal-form').addEventListener('submit', async function(e){
       e.preventDefault();
@@ -2798,6 +3108,16 @@
             common.quoteSentAt = nowIso();
           } else if (stage === 'opportunity' || stage === 'hot_lead'){
             common.quoteSentAt = null;
+          }
+          if (stage === 'scheduled' && editing.stage !== 'scheduled'){
+            common.scheduledAt = nowIso();
+          } else if (stage === 'opportunity' || stage === 'hot_lead' || stage === 'quote_sent'){
+            common.scheduledAt = null;
+          }
+          if (stage === 'job_completed' && editing.stage !== 'job_completed'){
+            common.jobCompletedAt = nowIso();
+          } else if (stage === 'opportunity' || stage === 'hot_lead' || stage === 'quote_sent' || stage === 'scheduled'){
+            common.jobCompletedAt = null;
           }
           if (isRealized(stage)){
             if (!isRealized(editing.stage)){
@@ -2880,6 +3200,7 @@
           '<div class="form-field full"><label for="cm-notes">Notes</label><textarea id="cm-notes">'+esc(editing ? editing.notes : '')+'</textarea></div>' +
         '</div>' +
         (relatedDeals.length ? '<div class="section-label" style="margin-top:6px;">Vehicle &amp; job history</div><div class="deal-list-mini">'+relatedDeals.map(function(d){ return '<div class="dlm-row"><span>'+esc(d.title||'Untitled')+(d.vehicle?' &middot; '+esc(d.vehicle):'')+'</span><span>'+esc(stageInfo(d.stage).label)+'</span></div>'; }).join('')+'</div>' : '') +
+        (editing ? '<div class="review-btn-row"><label style="display:block;font-size:12px;font-weight:600;color:var(--color-text-muted);margin-bottom:6px;">Follow-up activity</label><button type="button" class="btn btn-ghost btn-sm" id="cm-log-followup">+ Log follow-up</button></div>' : '') +
         '<div class="modal-actions">' +
           (editing ? '<button type="button" class="btn btn-danger btn-sm" id="cm-delete">Delete</button>' : '<span></span>') +
           '<div class="right"><button type="button" class="btn btn-ghost" id="cm-cancel">Cancel</button><button type="submit" class="btn btn-primary">'+(editing ? 'Save changes' : 'Add contact')+'</button></div>' +
@@ -2893,6 +3214,8 @@
       document.getElementById('cm-delete').addEventListener('click', function(){
         openConfirmModal('Delete this contact?', 'Linked opportunities will keep their info but lose the contact link.', 'Delete', function(){ deleteContact(contactId); });
       });
+      var logFollowupBtn = document.getElementById('cm-log-followup');
+      if (logFollowupBtn){ logFollowupBtn.addEventListener('click', function(){ openLogFollowupModal(contactId, null); }); }
     }
     document.getElementById('contact-form').addEventListener('submit', async function(e){
       e.preventDefault();
