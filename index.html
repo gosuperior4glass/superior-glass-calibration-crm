@@ -721,7 +721,7 @@
     sessionExp: 0,
     currentUser: null,
     syncStatus: 'idle',
-    users: {},
+    users: [],
     auditLog: []
   };
   var DEFAULT_GOALS = { leadsGoal: 20, quotesGoal: 15, closedGoal: 8, revenueGoal: 12000 };
@@ -1766,7 +1766,8 @@
   // Admin-only) — this is an honest fallback, not an error state.
   function resolveTeamMemberName(emailOrName){
     if (!emailOrName) return emailOrName;
-    var match = (state.users||[]).find(function(u){ return String(u.email||'').trim().toLowerCase() === String(emailOrName).trim().toLowerCase(); });
+    var users = Array.isArray(state.users) ? state.users : [];
+    var match = users.find(function(u){ return String(u.email||'').trim().toLowerCase() === String(emailOrName).trim().toLowerCase(); });
     return (match && match.name) ? match.name : emailOrName;
   }
   // Opportunistically loads the Users list (already-existing Admin-only
@@ -1775,8 +1776,11 @@
   // call on every render — it only fetches when state.users is still empty,
   // so it naturally stops re-fetching after the first successful load.
   function ensureUsersLoadedForReports(){
-    if (state.currentUser && state.currentUser.role === 'Admin' && (!state.users || state.users.length === 0)){
-      loadUsersAndAudit().then(function(){ if (state.view === 'reports') renderReports(); });
+    if (state.currentUser && state.currentUser.role === 'Admin' && (!Array.isArray(state.users) || state.users.length === 0)){
+      loadUsersAndAudit().then(function(){
+        if (state.view === 'reports') renderReports();
+        else if (state.view === 'operations') renderOperations();
+      });
     }
   }
 
@@ -2042,11 +2046,12 @@
   var pendingTaskTransitions = {}; // taskId -> 'completing' | 'reopening'
   function effectiveTaskDone(t){
     var pending = pendingTaskTransitions[t.id];
-    if (pending === 'completing') return false;
-    if (pending === 'reopening') return true;
+    if (pending === 'completing') return true;  // move to Completed immediately; card shows a "saving" placeholder until confirmed
+    if (pending === 'reopening') return false;  // move to Open immediately; reconciles to server state once confirmed
     return !!t.done;
   }
   function renderOperations(){
+    ensureUsersLoadedForReports();
     var allTasks = Object.keys(state.tasks).map(function(k){ return state.tasks[k]; });
     var openTasks = allTasks.filter(function(t){ return !effectiveTaskDone(t); }).sort(function(a,b){ return (a.dueDate||'').localeCompare(b.dueDate||''); });
     var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; })).filter(function(d){ return !d.archived; });
@@ -2160,8 +2165,10 @@
   function renderCompletedTasksColumn(allTasks){
     var cutoff = Date.now() - 14*86400000;
     // completedAt-only — never updatedAt/createdAt/dueDate — per the approved rule.
-    var completed = allTasks.filter(function(t){ return effectiveTaskDone(t) && t.completedAt && new Date(t.completedAt).getTime() >= cutoff; })
-      .sort(function(a,b){ return new Date(b.completedAt) - new Date(a.completedAt); });
+    var completed = allTasks.filter(function(t){
+      if (pendingTaskTransitions[t.id] === 'completing') return true; // shown with a "saving" placeholder below, not a fabricated date
+      return effectiveTaskDone(t) && t.completedAt && new Date(t.completedAt).getTime() >= cutoff;
+    }).sort(function(a,b){ return new Date(b.completedAt||0) - new Date(a.completedAt||0); });
 
     var assigneeSel = document.getElementById('ops-completed-assignee-filter');
     var assignees = knownTeamMembers();
@@ -2186,18 +2193,22 @@
       var metaParts = [resolveTeamMemberName(t.assignedTo) || 'Unassigned'];
       if (t.dueDate) metaParts.push('Due '+t.dueDate);
       if (linkedDeal) metaParts.push('Re: '+(linkedDeal.title||'Untitled job'));
+      var isPendingCompletion = pendingTaskTransitions[t.id] === 'completing';
+      var completionLine = isPendingCompletion
+        ? 'Saving completion\u2026'
+        : 'Completed '+esc(fmtWhen(t.completedAt))+' \u00b7 100% Complete';
       var card = el(
         '<div class="task-row completed-task-card" style="align-items:flex-start;">' +
           '<div style="flex:1;min-width:0;">' +
             '<div class="t-title">\u2713 '+esc(t.title)+'</div>' +
             '<div class="t-meta">'+esc(metaParts.join(' \u00b7 '))+'</div>' +
             (t.notes ? '<div class="task-note-preview">'+esc(t.notes)+'</div>' : '') +
-            '<div class="t-meta">Completed '+esc(fmtWhen(t.completedAt))+' \u00b7 100% Complete</div>' +
+            '<div class="t-meta">'+completionLine+'</div>' +
           '</div>' +
-          '<button type="button" class="btn btn-ghost btn-sm" data-reopen style="flex-shrink:0;">Reopen</button>' +
+          '<button type="button" class="btn btn-ghost btn-sm" data-reopen style="flex-shrink:0;"'+(isPendingCompletion?' disabled':'')+'>Reopen</button>' +
         '</div>'
       );
-      card.querySelector('[data-reopen]').addEventListener('click', function(){ handleReopen(t.id); });
+      card.querySelector('[data-reopen]').addEventListener('click', function(){ if (!isPendingCompletion) handleReopen(t.id); });
       wrap.appendChild(card);
     });
   }
@@ -2534,7 +2545,7 @@
     document.getElementById('users-list').innerHTML = '<div class="empty-note">Loading\u2026</div>';
     loadUsersAndAudit().then(function(){
       var wrap = document.getElementById('users-list');
-      var users = state.users || [];
+      var users = Array.isArray(state.users) ? state.users : [];
       if (users.length === 0){ wrap.innerHTML = '<div class="empty-note">No employees yet \u2014 add your first one.</div>'; }
       else {
         wrap.innerHTML = '';
@@ -2568,7 +2579,7 @@
     apiPostRaw(Object.assign({ action:'saveUser', email: email }, patch));
     await sleep(900);
     await loadUsersAndAudit();
-    var updated = (state.users||[]).find(function(u){ return String(u.email||'').trim().toLowerCase() === email.trim().toLowerCase(); });
+    var updated = (Array.isArray(state.users) ? state.users : []).find(function(u){ return String(u.email||'').trim().toLowerCase() === email.trim().toLowerCase(); });
     var applied = updated && updated.role === patch.role && isActiveFlag(updated.active) === !!patch.active;
     setSyncBadge(applied ? 'idle' : 'conflict');
     renderUsers();
