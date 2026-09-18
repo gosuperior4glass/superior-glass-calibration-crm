@@ -2221,7 +2221,13 @@
         'Mark this task Done?',
         'This task is 100% complete. Mark it Done?',
         'Yes, mark Done', 'Not yet',
-        function(){ pendingTaskTransitions[taskId] = 'completing'; saveTask(taskId, { percentComplete:100, done:true }).then(function(){ delete pendingTaskTransitions[taskId]; renderOperations(); }); },
+        function(){
+          pendingTaskTransitions[taskId] = 'completing';
+          saveTask(taskId, { percentComplete:100, done:true }).finally(function(){
+            delete pendingTaskTransitions[taskId];
+            renderOperations();
+          });
+        },
         function(){ saveTask(taskId, { percentComplete:100 }); }
       );
     } else {
@@ -2231,16 +2237,22 @@
   async function handleDoneClick(taskId){
     if (!state.tasks[taskId]) return;
     pendingTaskTransitions[taskId] = 'completing';
-    await saveTask(taskId, { percentComplete:100, done:true });
-    delete pendingTaskTransitions[taskId];
-    renderOperations();
+    try {
+      await saveTask(taskId, { percentComplete:100, done:true });
+    } finally {
+      delete pendingTaskTransitions[taskId];
+      renderOperations();
+    }
   }
   async function handleReopen(taskId){
     if (!state.tasks[taskId]) return;
     pendingTaskTransitions[taskId] = 'reopening';
-    await saveTask(taskId, { done:false });
-    delete pendingTaskTransitions[taskId];
-    renderOperations();
+    try {
+      await saveTask(taskId, { done:false });
+    } finally {
+      delete pendingTaskTransitions[taskId];
+      renderOperations();
+    }
   }
   function openTaskNoteModal(taskId){
     var t = state.tasks[taskId];
