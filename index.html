@@ -91,6 +91,14 @@
   .audit-row:last-child { border-bottom:none; }
   .audit-row .a-top { display:flex; justify-content:space-between; gap:10px; color: var(--color-text-muted); font-size:11px; }
   .last-updated-line { font-size:11.5px; color: var(--color-text-muted); margin-top:10px; }
+  .task-progress-row { display:flex; align-items:center; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .task-percent-select { font-size:12px; padding:3px 6px; border-radius:6px; border:1px solid var(--color-border); background:var(--color-surface); color:var(--color-text); flex-shrink:0; }
+  .task-progress-track { flex:1; min-width:50px; height:6px; border-radius:4px; background:var(--color-surface-2); overflow:hidden; }
+  .task-progress-fill { height:100%; border-radius:4px; background:var(--color-accent-2); }
+  .task-progress-label { font-size:11.5px; color:var(--color-text-muted); white-space:nowrap; flex-shrink:0; }
+  .task-note-preview { font-size:12px; color:var(--color-text-muted); font-style:italic; margin-top:6px; overflow-wrap:anywhere; }
+  .completed-task-card { background: var(--color-surface-2); }
+  .completed-task-card .t-title { font-weight:600; }
   .sync-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; background:#6F8F65; position:relative; top:-1px; }
   .sync-dot.off { background:#B4543F; }
 
@@ -481,7 +489,7 @@
           <div class="trend-chart-wrap"><div class="trend-chart-title">Average job value</div><div id="trend-avg-job"></div></div>
           <div class="trend-chart-wrap"><div class="trend-chart-title">Win rate</div><div id="trend-win-rate"></div></div>
         </div>
-        <div class="empty-note" style="margin-top:6px;">A monthly "Collected Revenue" trend isn't included here on purpose: the CRM stores each job's total Amount Paid as a single current figure, not a dated history of individual payments, so there's no reliable way to know which calendar month a given dollar was actually collected in \u2014 only how much has been paid on a job as of right now. Adding a monthly trend from that would risk showing a misleading picture rather than a real one.</div>
+        <div class="empty-note" style="margin-top:6px;">A monthly "Collected Revenue" trend isn't included here on purpose: the CRM stores each job's total Amount Paid as a single current figure, not a dated history of individual payments, so there's no reliable way to know which calendar month a given dollar was actually collected in &mdash; only how much has been paid on a job as of right now. Adding a monthly trend from that would risk showing a misleading picture rather than a real one.</div>
       </section>
 
       <section class="view" data-view="reports" hidden>
@@ -510,8 +518,8 @@
 
         <div class="stat-row" id="reports-stats"></div>
 
-        <div class="section-label">Sales funnel \u2014 Opportunities initiated in selected period</div>
-        <div class="page-sub" style="margin-top:-8px;">Opportunities \u2192 Quotes \u2192 Scheduled \u2192 Job Completed \u2192 Fully Paid</div>
+        <div class="section-label">Opportunity Progress &mdash; Opportunities Initiated in Selected Period</div>
+        <div class="page-sub" style="margin-top:-8px;">Opportunities &rarr; Quotes &rarr; Scheduled &rarr; Job Completed &rarr; Fully Paid</div>
         <div id="reports-funnel"></div>
 
         <div class="section-label" style="margin-top:24px;">Performance by service type</div>
@@ -555,17 +563,22 @@
         <div class="stat-row" id="ops-stats"></div>
         <div class="two-col">
           <div>
-            <div class="section-label" style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-              <span>Open tasks</span>
-              <select class="search-input" id="ops-assignee-filter" style="max-width:170px; font-size:12.5px; padding:6px 9px;"></select>
+            <div class="section-label" id="ops-open-tasks-label" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+              <span>Open Tasks (0)</span>
+              <select class="search-input" id="ops-assignee-filter" style="max-width:150px; font-size:12.5px; padding:6px 9px;"></select>
             </div>
             <div class="panel-list" id="ops-task-list"></div>
           </div>
           <div>
-            <div class="section-label">Payments needing attention</div>
-            <div class="panel-list" id="ops-payment-list"></div>
+            <div class="section-label" id="ops-completed-tasks-label" style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+              <span>Completed Tasks (0)</span>
+              <select class="search-input" id="ops-completed-assignee-filter" style="max-width:150px; font-size:12.5px; padding:6px 9px;"></select>
+            </div>
+            <div class="panel-list" id="ops-completed-task-list"></div>
           </div>
         </div>
+        <div class="section-label" style="margin-top:24px;">Payments needing attention</div>
+        <div class="panel-list" id="ops-payment-list"></div>
       </section>
 
       <section class="view" data-view="field" hidden>
@@ -702,6 +715,7 @@
     reportsCustomFrom: '',
     reportsCustomTo: '',
     trendsRange: 12,
+    completedTaskAssigneeFilter: 'all',
     taskAssigneeFilter: 'all',
     sessionToken: null,
     sessionExp: 0,
@@ -1744,6 +1758,28 @@
   //     so they're clearly labeled as an estimate, not a confirmed history.
   //   - Outstanding Payments: unscoped by design — always the live, current
   //     balance, not limited to the selected period.
+  // Display-only: resolves a createdBy email to that user's stored name, for
+  // the "Opportunities Initiated by Team" report. createdBy itself is never
+  // changed — this only affects what's shown in the table/CSV cell. Falls
+  // back to the raw value (the email) if no match is found, including for
+  // non-Admins, who can't load the Users list at all (that endpoint is
+  // Admin-only) — this is an honest fallback, not an error state.
+  function resolveTeamMemberName(emailOrName){
+    if (!emailOrName) return emailOrName;
+    var match = (state.users||[]).find(function(u){ return String(u.email||'').trim().toLowerCase() === String(emailOrName).trim().toLowerCase(); });
+    return (match && match.name) ? match.name : emailOrName;
+  }
+  // Opportunistically loads the Users list (already-existing Admin-only
+  // fetch, reused as-is) if it isn't already in memory, then re-renders
+  // Reports once it arrives so names resolve without a page reload. Safe to
+  // call on every render — it only fetches when state.users is still empty,
+  // so it naturally stops re-fetching after the first successful load.
+  function ensureUsersLoadedForReports(){
+    if (state.currentUser && state.currentUser.role === 'Admin' && (!state.users || state.users.length === 0)){
+      loadUsersAndAudit().then(function(){ if (state.view === 'reports') renderReports(); });
+    }
+  }
+
   function computeReportData(){
     var range = getReportRange();
     var allDeals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; })).filter(function(d){ return !d.archived; });
@@ -1807,6 +1843,7 @@
   function renderReports(){
     document.querySelectorAll('#reports-range button').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-range') === state.reportsRange); });
     document.getElementById('reports-custom-row').style.display = state.reportsRange === 'custom' ? 'flex' : 'none';
+    ensureUsersLoadedForReports();
 
     var data = computeReportData();
     var range = data.range;
@@ -1899,7 +1936,7 @@
         creatorKeys.map(function(k){
           var c = data.byCreator[k];
           var winRate = (c.won+c.lost) ? Math.round(c.won/(c.won+c.lost)*100)+'%' : '\u2014';
-          return '<tr><td>'+esc(k)+'</td><td>'+c.total+'</td><td>'+fmtMoneyPrecise(c.quoted)+'</td><td>'+c.won+'</td><td>'+winRate+'</td><td>'+fmtMoneyPrecise(c.revenue)+'</td></tr>';
+          return '<tr><td>'+esc(resolveTeamMemberName(k))+'</td><td>'+c.total+'</td><td>'+fmtMoneyPrecise(c.quoted)+'</td><td>'+c.won+'</td><td>'+winRate+'</td><td>'+fmtMoneyPrecise(c.revenue)+'</td></tr>';
         }).join('') + '</tbody></table></div>';
     }
 
@@ -1938,7 +1975,7 @@
     lines.push(['Jobs won', data.won.length].map(csvEscape).join(','));
     lines.push(['Win rate', data.winRatePct===null?'N/A':data.winRatePct+'%'].map(csvEscape).join(','));
     lines.push('');
-    lines.push(csvEscape('Sales funnel - Opportunities initiated in selected period'));
+    lines.push(csvEscape('Opportunity Progress - Opportunities Initiated in Selected Period'));
     lines.push(['Stage','Count'].map(csvEscape).join(','));
     lines.push(['Opportunities', data.funnel.opps].map(csvEscape).join(','));
     lines.push(['Quotes', data.funnel.quotes].map(csvEscape).join(','));
@@ -1981,7 +2018,7 @@
     Object.keys(data.byCreator).forEach(function(k){
       var c = data.byCreator[k];
       var winRate = (c.won+c.lost) ? Math.round(c.won/(c.won+c.lost)*100)+'%' : 'N/A';
-      lines.push([k, c.total, c.quoted.toFixed(2), c.won, winRate, c.revenue.toFixed(2)].map(csvEscape).join(','));
+      lines.push([resolveTeamMemberName(k), c.total, c.quoted.toFixed(2), c.won, winRate, c.revenue.toFixed(2)].map(csvEscape).join(','));
     });
     lines.push('');
     lines.push(csvEscape('Customer mix'));
@@ -1995,65 +2032,39 @@
   }
 
   // ---------- operations (tasks + collections) ----------
+  // Done/Reopen must not visually move a task between columns until the
+  // backend has confirmed the change (saveTask's normal optimistic update
+  // happens immediately, which is correct for every other field — but a
+  // task jumping columns on an unconfirmed guess is exactly what "don't
+  // show as completed until confirmed" rules out). While a taskId is here,
+  // effectiveTaskDone() below reports its PRE-transition state regardless
+  // of what saveTask has already optimistically written to state.tasks.
+  var pendingTaskTransitions = {}; // taskId -> 'completing' | 'reopening'
+  function effectiveTaskDone(t){
+    var pending = pendingTaskTransitions[t.id];
+    if (pending === 'completing') return false;
+    if (pending === 'reopening') return true;
+    return !!t.done;
+  }
   function renderOperations(){
-    var tasks = Object.keys(state.tasks).map(function(k){ return state.tasks[k]; }).filter(function(t){ return !t.done; }).sort(function(a,b){ return (a.dueDate||'').localeCompare(b.dueDate||''); });
+    var allTasks = Object.keys(state.tasks).map(function(k){ return state.tasks[k]; });
+    var openTasks = allTasks.filter(function(t){ return !effectiveTaskDone(t); }).sort(function(a,b){ return (a.dueDate||'').localeCompare(b.dueDate||''); });
     var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; })).filter(function(d){ return !d.archived; });
     var due = deals.filter(function(d){ return (d.stage==='job_completed' || isRealized(d.stage)) && dealBalance(d) > 0; });
     var waitingParts = deals.filter(function(d){ return ['Needs ordering','Ordered'].indexOf(d.partsStatus) !== -1; });
     var waitingInsurance = deals.filter(function(d){ return d.insuranceAuthorized === 'pending'; });
 
-    var pastDueCount = tasks.filter(function(t){ return t.dueDate && t.dueDate < localDateKey(); }).length;
+    var pastDueCount = openTasks.filter(function(t){ return t.dueDate && t.dueDate < localDateKey(); }).length;
     document.getElementById('ops-stats').innerHTML = [
-      ['Open tasks', tasks.length, 'Follow-ups and work'],
+      ['Open tasks', openTasks.length, 'Follow-ups and work'],
       ['Past due', pastDueCount, 'Needs immediate attention'],
       ['Balances due', due.length, 'Payment attention'],
       ['Waiting on glass', waitingParts.length, 'Parts action'],
       ['Insurance pending', waitingInsurance.length, 'Approval action']
     ].map(function(x){ return '<div class="stat-chip"><div class="stat-label">'+esc(x[0])+'</div><div class="stat-val">'+x[1]+'</div><div class="stat-sub">'+esc(x[2])+'</div></div>'; }).join('');
 
-    var assigneeSel = document.getElementById('ops-assignee-filter');
-    var assignees = knownTeamMembers();
-    var optionsHtml = '<option value="all">Everyone</option><option value="__unassigned">Unassigned</option>' + assignees.map(function(n){ return '<option value="'+esc(n)+'">'+esc(n)+'</option>'; }).join('');
-    if (assigneeSel.innerHTML !== optionsHtml) assigneeSel.innerHTML = optionsHtml;
-    if (assigneeSel.value !== state.taskAssigneeFilter) assigneeSel.value = state.taskAssigneeFilter;
-
-    var visibleTasks = tasks.filter(function(t){
-      if (state.taskAssigneeFilter === 'all') return true;
-      if (state.taskAssigneeFilter === '__unassigned') return !t.assignedTo;
-      return t.assignedTo === state.taskAssigneeFilter;
-    });
-
-    var taskWrap = document.getElementById('ops-task-list');
-    if (visibleTasks.length === 0){ taskWrap.innerHTML = '<div class="empty-note">'+(tasks.length ? 'No open tasks match this filter.' : 'No open tasks. Add one with "+ New task."')+'</div>'; }
-    else {
-      taskWrap.innerHTML = '';
-      var todayKey = localDateKey();
-      var tomorrowKey = localDateKey(new Date(Date.now() + 86400000));
-      visibleTasks.forEach(function(t){
-        var linkedDeal = t.dealId ? state.deals[t.dealId] : null;
-        var dueBadge = '';
-        if (t.dueDate && t.dueDate < todayKey) dueBadge = '<span class="stale-badge" style="background:var(--color-danger);color:#fff;">PAST DUE</span>';
-        else if (t.dueDate === todayKey) dueBadge = '<span class="stale-badge" style="background:var(--color-success);color:#fff;">DUE TODAY</span>';
-        else if (t.dueDate === tomorrowKey) dueBadge = '<span class="stale-badge" style="background:#DCF0D3;color:#1C4A17;">DUE TOMORROW</span>';
-        var metaParts = [];
-        metaParts.push(t.dueDate ? 'Due '+t.dueDate : 'No due date');
-        if (t.assignedTo) metaParts.push('Assigned to '+t.assignedTo);
-        if (linkedDeal) metaParts.push('Re: '+(linkedDeal.title||'Untitled job'));
-        var row = el('<div class="task-row" style="cursor:pointer;"><div><div class="t-title">'+esc(t.title)+dueBadge+'</div><div class="t-meta">'+esc(metaParts.join(' \u00b7 '))+'</div></div></div>');
-        row.addEventListener('click', function(){ openTaskModal(t.id); });
-        var actions = el('<div style="display:flex;gap:6px;"></div>');
-        if (linkedDeal){
-          var openBtn = el('<button class="btn btn-ghost btn-sm">Open job</button>');
-          openBtn.addEventListener('click', function(e){ e.stopPropagation(); openDealModal(t.dealId); });
-          actions.appendChild(openBtn);
-        }
-        var doneBtn = el('<button class="btn btn-ghost btn-sm">Done</button>');
-        doneBtn.addEventListener('click', function(e){ e.stopPropagation(); saveTask(t.id, { done:true, updatedAt: nowIso() }); });
-        actions.appendChild(doneBtn);
-        row.appendChild(actions);
-        taskWrap.appendChild(row);
-      });
-    }
+    renderOpenTasksColumn(openTasks);
+    renderCompletedTasksColumn(allTasks);
 
     var payWrap = document.getElementById('ops-payment-list');
     if (due.length === 0){ payWrap.innerHTML = '<div class="empty-note">No payment attention needed.</div>'; }
@@ -2069,8 +2080,186 @@
       });
     }
   }
+
+  function renderOpenTasksColumn(openTasks){
+    var assigneeSel = document.getElementById('ops-assignee-filter');
+    var assignees = knownTeamMembers();
+    var optionsHtml = '<option value="all">Everyone</option><option value="__unassigned">Unassigned</option>' + assignees.map(function(n){ return '<option value="'+esc(n)+'">'+esc(n)+'</option>'; }).join('');
+    if (assigneeSel.innerHTML !== optionsHtml) assigneeSel.innerHTML = optionsHtml;
+    if (assigneeSel.value !== state.taskAssigneeFilter) assigneeSel.value = state.taskAssigneeFilter;
+
+    var visibleTasks = openTasks.filter(function(t){
+      if (state.taskAssigneeFilter === 'all') return true;
+      if (state.taskAssigneeFilter === '__unassigned') return !t.assignedTo;
+      return t.assignedTo === state.taskAssigneeFilter;
+    });
+
+    document.querySelector('#ops-open-tasks-label span').textContent = 'Open Tasks (' + visibleTasks.length + ')';
+
+    var taskWrap = document.getElementById('ops-task-list');
+    if (visibleTasks.length === 0){ taskWrap.innerHTML = '<div class="empty-note">'+(openTasks.length ? 'No open tasks match this filter.' : 'No open tasks. Add one with "+ New task."')+'</div>'; return; }
+    taskWrap.innerHTML = '';
+    var todayKey = localDateKey();
+    var tomorrowKey = localDateKey(new Date(Date.now() + 86400000));
+    visibleTasks.forEach(function(t){
+      var linkedDeal = t.dealId ? state.deals[t.dealId] : null;
+      var dueBadge = '';
+      if (t.dueDate && t.dueDate < todayKey) dueBadge = '<span class="stale-badge" style="background:var(--color-danger);color:#fff;">PAST DUE</span>';
+      else if (t.dueDate === todayKey) dueBadge = '<span class="stale-badge" style="background:var(--color-success);color:#fff;">DUE TODAY</span>';
+      else if (t.dueDate === tomorrowKey) dueBadge = '<span class="stale-badge" style="background:#DCF0D3;color:#1C4A17;">DUE TOMORROW</span>';
+      var metaParts = [];
+      metaParts.push(t.dueDate ? 'Due '+t.dueDate : 'No due date');
+      if (t.assignedTo) metaParts.push('Assigned to '+t.assignedTo);
+      if (linkedDeal) metaParts.push('Re: '+(linkedDeal.title||'Untitled job'));
+      var pct = Number(t.percentComplete)||0;
+
+      var row = el(
+        '<div class="task-row" style="cursor:pointer; align-items:flex-start;">' +
+          '<div style="flex:1; min-width:0;">' +
+            '<div class="t-title">'+esc(t.title)+dueBadge+'</div>' +
+            '<div class="t-meta">'+esc(metaParts.join(' \u00b7 '))+'</div>' +
+            '<div class="task-progress-row"></div>' +
+            (t.notes ? '<div class="task-note-preview">'+esc(t.notes)+'</div>' : '') +
+            '<button type="button" class="btn btn-ghost btn-sm" data-add-note style="margin-top:6px;">'+(t.notes?'Edit note':'+ Add note')+'</button>' +
+          '</div>' +
+        '</div>'
+      );
+      row.addEventListener('click', function(){ openTaskModal(t.id); });
+
+      var progRow = row.querySelector('.task-progress-row');
+      var select = document.createElement('select');
+      select.className = 'task-percent-select';
+      [0,25,50,75,100].forEach(function(v){
+        var opt = document.createElement('option');
+        opt.value = v; opt.textContent = v+'%';
+        if (v === pct) opt.selected = true;
+        select.appendChild(opt);
+      });
+      select.addEventListener('click', function(e){ e.stopPropagation(); });
+      select.addEventListener('change', function(e){ e.stopPropagation(); handlePercentChange(t.id, Number(select.value)); });
+      var track = el('<div class="task-progress-track"><div class="task-progress-fill" style="width:'+pct+'%;"></div></div>');
+      var label = el('<span class="task-progress-label">'+pct+'% Complete</span>');
+      progRow.appendChild(select); progRow.appendChild(track); progRow.appendChild(label);
+
+      row.querySelector('[data-add-note]').addEventListener('click', function(e){ e.stopPropagation(); openTaskNoteModal(t.id); });
+
+      var actions = el('<div style="display:flex;gap:6px;flex-shrink:0;"></div>');
+      if (linkedDeal){
+        var openBtn = el('<button class="btn btn-ghost btn-sm">Open job</button>');
+        openBtn.addEventListener('click', function(e){ e.stopPropagation(); openDealModal(t.dealId); });
+        actions.appendChild(openBtn);
+      }
+      var doneBtn = el('<button class="btn btn-primary btn-sm">Done</button>');
+      doneBtn.addEventListener('click', function(e){ e.stopPropagation(); handleDoneClick(t.id); });
+      actions.appendChild(doneBtn);
+      row.appendChild(actions);
+      taskWrap.appendChild(row);
+    });
+  }
+
+  function renderCompletedTasksColumn(allTasks){
+    var cutoff = Date.now() - 14*86400000;
+    // completedAt-only — never updatedAt/createdAt/dueDate — per the approved rule.
+    var completed = allTasks.filter(function(t){ return effectiveTaskDone(t) && t.completedAt && new Date(t.completedAt).getTime() >= cutoff; })
+      .sort(function(a,b){ return new Date(b.completedAt) - new Date(a.completedAt); });
+
+    var assigneeSel = document.getElementById('ops-completed-assignee-filter');
+    var assignees = knownTeamMembers();
+    var optionsHtml = '<option value="all">All team members</option>' + assignees.map(function(n){ return '<option value="'+esc(n)+'">'+esc(resolveTeamMemberName(n))+'</option>'; }).join('');
+    if (assigneeSel.innerHTML !== optionsHtml) assigneeSel.innerHTML = optionsHtml;
+    if (assigneeSel.value !== state.completedTaskAssigneeFilter) assigneeSel.value = state.completedTaskAssigneeFilter;
+
+    var visible = completed.filter(function(t){ return state.completedTaskAssigneeFilter === 'all' || t.assignedTo === state.completedTaskAssigneeFilter; });
+
+    document.querySelector('#ops-completed-tasks-label span').textContent = 'Completed Tasks (' + visible.length + ')';
+
+    var wrap = document.getElementById('ops-completed-task-list');
+    if (visible.length === 0){
+      wrap.innerHTML = '<div class="empty-note">' + (state.completedTaskAssigneeFilter === 'all'
+        ? 'No completed tasks in the last 14 days.'
+        : 'No completed tasks for this team member in the last 14 days.') + '</div>';
+      return;
+    }
+    wrap.innerHTML = '';
+    visible.forEach(function(t){
+      var linkedDeal = t.dealId ? state.deals[t.dealId] : null;
+      var metaParts = [resolveTeamMemberName(t.assignedTo) || 'Unassigned'];
+      if (t.dueDate) metaParts.push('Due '+t.dueDate);
+      if (linkedDeal) metaParts.push('Re: '+(linkedDeal.title||'Untitled job'));
+      var card = el(
+        '<div class="task-row completed-task-card" style="align-items:flex-start;">' +
+          '<div style="flex:1;min-width:0;">' +
+            '<div class="t-title">\u2713 '+esc(t.title)+'</div>' +
+            '<div class="t-meta">'+esc(metaParts.join(' \u00b7 '))+'</div>' +
+            (t.notes ? '<div class="task-note-preview">'+esc(t.notes)+'</div>' : '') +
+            '<div class="t-meta">Completed '+esc(fmtWhen(t.completedAt))+' \u00b7 100% Complete</div>' +
+          '</div>' +
+          '<button type="button" class="btn btn-ghost btn-sm" data-reopen style="flex-shrink:0;">Reopen</button>' +
+        '</div>'
+      );
+      card.querySelector('[data-reopen]').addEventListener('click', function(){ handleReopen(t.id); });
+      wrap.appendChild(card);
+    });
+  }
+
+  function handlePercentChange(taskId, newPercent){
+    var t = state.tasks[taskId];
+    if (!t) return;
+    if (newPercent === 100 && !t.done){
+      openYesNoModal(
+        'Mark this task Done?',
+        'This task is 100% complete. Mark it Done?',
+        'Yes, mark Done', 'Not yet',
+        function(){ pendingTaskTransitions[taskId] = 'completing'; saveTask(taskId, { percentComplete:100, done:true }).then(function(){ delete pendingTaskTransitions[taskId]; renderOperations(); }); },
+        function(){ saveTask(taskId, { percentComplete:100 }); }
+      );
+    } else {
+      saveTask(taskId, { percentComplete:newPercent });
+    }
+  }
+  async function handleDoneClick(taskId){
+    if (!state.tasks[taskId]) return;
+    pendingTaskTransitions[taskId] = 'completing';
+    await saveTask(taskId, { percentComplete:100, done:true });
+    delete pendingTaskTransitions[taskId];
+    renderOperations();
+  }
+  async function handleReopen(taskId){
+    if (!state.tasks[taskId]) return;
+    pendingTaskTransitions[taskId] = 'reopening';
+    await saveTask(taskId, { done:false });
+    delete pendingTaskTransitions[taskId];
+    renderOperations();
+  }
+  function openTaskNoteModal(taskId){
+    var t = state.tasks[taskId];
+    if (!t) return;
+    modalBox.innerHTML =
+      '<div class="modal-head"><div class="modal-title">Task note</div><button class="modal-close" id="tn-close">&times;</button></div>' +
+      '<div style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:10px;">'+esc(t.title)+'</div>' +
+      '<form id="task-note-form">' +
+        '<div class="form-field full"><label for="tn-notes">Note</label><textarea id="tn-notes" placeholder="e.g. Called customer \u2014 waiting on insurance approval.">'+esc(t.notes||'')+'</textarea></div>' +
+        '<div class="modal-actions"><span></span><div class="right"><button type="button" class="btn btn-ghost" id="tn-cancel">Cancel</button><button type="submit" class="btn btn-primary">Save note</button></div></div>' +
+      '</form>';
+    backdrop.hidden = false;
+    document.getElementById('tn-close').addEventListener('click', closeModal);
+    document.getElementById('tn-cancel').addEventListener('click', closeModal);
+    document.getElementById('task-note-form').addEventListener('submit', async function(e){
+      e.preventDefault();
+      var submitBtn = e.target.querySelector('button[type="submit"]');
+      var notes = document.getElementById('tn-notes').value.trim();
+      if (submitBtn) submitBtn.disabled = true;
+      setModalStatus(null, null);
+      var result = await saveTask(taskId, { notes: notes }, { silent:true });
+      if (submitBtn) submitBtn.disabled = false;
+      if (result.status === 'saved'){ closeModal(); }
+      else if (result.status === 'conflict'){ setModalStatus('conflict', 'Someone else updated this task while you were editing. Your note above is unchanged \u2014 click Save note again to apply it, or Cancel to review the latest version first.'); }
+      else { setModalStatus('failed', 'Not synced \u2014 check your connection and click Save note again. Nothing has been lost.'); }
+    });
+  }
   document.getElementById('ops-new-task-btn').addEventListener('click', function(){ openTaskModal(null); });
   document.getElementById('ops-assignee-filter').addEventListener('change', function(e){ state.taskAssigneeFilter = e.target.value; renderOperations(); });
+  document.getElementById('ops-completed-assignee-filter').addEventListener('change', function(e){ state.completedTaskAssigneeFilter = e.target.value; renderOperations(); });
   function knownTeamMembers(){
     var names = {};
     Object.keys(state.deals).forEach(function(k){ var a = state.deals[k].assignedTo; if (a) names[a] = true; });
@@ -2083,17 +2272,18 @@
     var teamMembers = knownTeamMembers();
     var openDeals = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){ return !d.archived; }).sort(function(a,b){ return new Date(b.createdAt||0) - new Date(a.createdAt||0); });
     var presetDeal = effectivePresetDealId ? state.deals[effectivePresetDealId] : null;
+    var lockedField = (editing && editing.done) ? 'disabled' : '';
     modalBox.innerHTML =
       '<div class="modal-head"><div class="modal-title">'+(editing ? 'Edit task' : 'New task')+'</div><button class="modal-close" id="nt-close">&times;</button></div>' +
       (editing && editing.updatedBy ? '<div class="last-updated-line" style="margin-top:-10px;">'+lastUpdatedLine(editing)+'</div>' : '') +
       '<form id="new-task-form">' +
-        '<div class="form-field full"><label for="nt-title">What needs to get done?</label><input id="nt-title" required autofocus placeholder="e.g. Call to confirm appointment" value="'+esc(editing ? editing.title : '')+'"></div>' +
+        '<div class="form-field full"><label for="nt-title">What needs to get done?</label><input id="nt-title" required autofocus placeholder="e.g. Call to confirm appointment" value="'+esc(editing ? editing.title : '')+'" '+lockedField+'></div>' +
         '<div class="form-grid">' +
-          '<div class="form-field"><label for="nt-assigned">Assign to</label><input id="nt-assigned" list="team-members-list" placeholder="e.g. Maria" value="'+esc(editing ? editing.assignedTo : '')+'"></div>' +
-          '<div class="form-field"><label for="nt-due">Due date</label><input id="nt-due" type="date" value="'+esc(editing ? (editing.dueDate||'') : localDateKey())+'"></div>' +
+          '<div class="form-field"><label for="nt-assigned">Assign to</label><input id="nt-assigned" list="team-members-list" placeholder="e.g. Maria" value="'+esc(editing ? editing.assignedTo : '')+'" '+lockedField+'></div>' +
+          '<div class="form-field"><label for="nt-due">Due date</label><input id="nt-due" type="date" value="'+esc(editing ? (editing.dueDate||'') : localDateKey())+'" '+lockedField+'></div>' +
         '</div>' +
         '<datalist id="team-members-list">'+teamMembers.map(function(n){ return '<option value="'+esc(n)+'">'; }).join('')+'</datalist>' +
-        '<div class="form-field full"><label for="nt-deal">Link to an opportunity (optional)</label><select id="nt-deal"><option value="">Not linked to a specific job</option>' +
+        '<div class="form-field full"><label for="nt-deal">Link to an opportunity (optional)</label><select id="nt-deal" '+lockedField+'><option value="">Not linked to a specific job</option>' +
           openDeals.map(function(d){
             var c = state.contacts[d.contactId];
             var label = (d.title||'Untitled job') + ' \u2014 ' + (c ? c.name : (d.contactName||'Unknown'));
@@ -2101,6 +2291,8 @@
           }).join('') +
         '</select></div>' +
         (presetDeal ? '<div style="font-size:12px;color:var(--color-text-muted);margin:-8px 0 12px;">Linked to: '+esc(presetDeal.title||'Untitled job')+'</div>' : '') +
+        '<div class="form-field full"><label for="nt-notes">Note</label><textarea id="nt-notes" placeholder="e.g. Called customer \u2014 waiting on insurance approval." '+lockedField+'>'+esc(editing ? (editing.notes||'') : '')+'</textarea></div>' +
+        (editing && editing.done ? '<div style="font-size:12px;color:var(--color-text-muted);margin:-8px 0 12px;">This task is completed \u2014 Reopen it from Completed Tasks to make changes.</div>' : '') +
         '<div class="modal-actions">' +
           (editing ? '<button type="button" class="btn btn-danger btn-sm" id="nt-delete">Delete</button>' : '<span></span>') +
           '<div class="right"><button type="button" class="btn btn-ghost" id="nt-cancel">Cancel</button><button type="submit" class="btn btn-primary">'+(editing ? 'Save changes' : 'Add task')+'</button></div>' +
@@ -2121,14 +2313,15 @@
       var dueDate = document.getElementById('nt-due').value;
       var assignedTo = document.getElementById('nt-assigned').value.trim();
       var dealId = document.getElementById('nt-deal').value;
+      var notes = document.getElementById('nt-notes').value.trim();
       if (!title) return;
       if (submitBtn) submitBtn.disabled = true;
       setModalStatus(null, null);
       var result;
       if (editing){
-        result = await saveTask(taskId, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, updatedAt: nowIso() }, { silent: true });
+        result = await saveTask(taskId, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, notes:notes, updatedAt: nowIso() }, { silent: true });
       } else {
-        result = await saveTask(null, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, done:false, createdAt: nowIso() }, { silent: true });
+        result = await saveTask(null, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, notes:notes, done:false, createdAt: nowIso() }, { silent: true });
       }
       if (submitBtn) submitBtn.disabled = false;
       if (result.status === 'saved'){
@@ -2454,6 +2647,19 @@
   }
   backdrop.addEventListener('click', function(e){ if (e.target === backdrop) closeModal(); });
   document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeModal(); });
+  // Like openConfirmModal, but both choices have a real effect (used for the
+  // "100% complete — mark Done?" prompt, where "No" still saves the 100%
+  // selection, it just doesn't mark the task done).
+  function openYesNoModal(title, message, yesLabel, noLabel, onYes, onNo){
+    modalBox.innerHTML =
+      '<div class="modal-head"><div class="modal-title">'+esc(title)+'</div><button class="modal-close" id="yn-close">&times;</button></div>' +
+      '<div style="font-size:13.5px;color:var(--color-text-muted);margin-bottom:4px;">'+esc(message)+'</div>' +
+      '<div class="modal-actions"><span></span><div class="right"><button type="button" class="btn btn-ghost" id="yn-no">'+esc(noLabel)+'</button><button type="button" class="btn btn-primary" id="yn-yes">'+esc(yesLabel)+'</button></div></div>';
+    backdrop.hidden = false;
+    document.getElementById('yn-close').addEventListener('click', function(){ closeModal(); if (onNo) onNo(); });
+    document.getElementById('yn-no').addEventListener('click', function(){ closeModal(); if (onNo) onNo(); });
+    document.getElementById('yn-yes').addEventListener('click', function(){ closeModal(); if (onYes) onYes(); });
+  }
 
   function openDealModal(dealId){
     var editing = dealId ? state.deals[dealId] : null;
