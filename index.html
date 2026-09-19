@@ -903,46 +903,31 @@
     var rawList = snap[sheetName] || [];
     var current = rawList.filter(function(r){ return String(r.id) === String(id); })[0] || (state[stateKey] ? state[stateKey][id] : null);
     var mine = current && current.updatedBy === (state.currentUser&&state.currentUser.email) && new Date(current.updatedAt).getTime() >= startedAt - 3000;
-    var fieldsMatch = mine && Object.keys(data).every(function(k){ return sameValue(current[k], data[k]); });
-    // ============ TEMPORARY DIAGNOSTIC — DEALS ONLY — REMOVE AFTER DEBUGGING ============
-    if (sheetName === 'deals' && mine && !fieldsMatch){
-      console.log('%cDEAL VERIFY DIAGNOSTIC \u2014 mine=true, fieldsMatch=false', 'font-weight:bold;font-size:13px;color:#b45309;');
-      console.log({
-        dealId: id,
-        expectedVersion: expectedVersion,
-        returnedVersion: current && current._version,
-        updatedBy: current && current.updatedBy,
-        currentUserEmail: state.currentUser && state.currentUser.email,
-        mine: mine
-      });
-      Object.keys(data).forEach(function(k){
-        var submitted = data[k];
-        var authoritative = current ? current[k] : undefined;
-        console.log({
-          field: k,
-          submittedValue: submitted,
-          authoritativeValue: authoritative,
-          submittedType: typeof submitted,
-          authoritativeType: typeof authoritative,
-          sameValueResult: sameValue(authoritative, submitted)
-        });
-      });
-    }
-    if (sheetName === 'deals'){
-      console.log('%cDEAL VERIFY \u2014 about to classify', 'font-weight:bold;font-size:13px;color:#1d4ed8;', {
-        dealId: id,
-        mine: mine,
-        fieldsMatch: fieldsMatch,
-        expectedVersion: expectedVersion,
-        currentVersion: current && current._version
-      });
-    }
-    // ============ END TEMPORARY DIAGNOSTIC ============
+    // Deal patches routinely include updatedAt (set client-side as a rough
+    // timestamp) even though handleSaveDeal() always regenerates it
+    // server-side on every save — so comparing it exactly compares a
+    // client guess against a server-authoritative value with normal
+    // request latency in between, which will almost never coincidentally
+    // match (confirmed by runtime diagnostic: ~1.3s apart on a real save).
+    // updatedBy/_version/createdBy/createdAt are the same kind of
+    // server-controlled metadata, excluded for the same reason even though
+    // only updatedAt was actually observed causing this. Excluding them
+    // does not weaken verification of the user's real business fields —
+    // mine (unaffected by this) is what already establishes the write is
+    // this session's own; these fields were never what needed confirming.
+    var DEAL_METADATA_FIELDS = { updatedAt:true, updatedBy:true, _version:true, createdAt:true, createdBy:true };
+    var fieldsToVerify = sheetName === 'deals' ? Object.keys(data).filter(function(k){ return !DEAL_METADATA_FIELDS[k]; }) : Object.keys(data);
+    var fieldsMatch = mine && fieldsToVerify.every(function(k){ return sameValue(current[k], data[k]); });
     if (mine && fieldsMatch){
       setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle();
       return { status:'saved', record: current };
     }
-    if (current && (current._version||0) > expectedVersion){
+    // Conflict requires !mine — if mine is true but a real business field
+    // still didn't match, that's a sync problem with THIS session's own
+    // write, never "updated by another team member." Only a write that
+    // isn't this session's own (mine === false) with an advanced version
+    // is a genuine external conflict.
+    if (!mine && current && (current._version||0) > expectedVersion){
       setSyncBadge('conflict');
       if (!options.silent) showConflictNotice(sheetName, current);
       return { status:'conflict', record: current };
