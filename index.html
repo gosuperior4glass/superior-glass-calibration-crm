@@ -904,6 +904,40 @@
     var current = rawList.filter(function(r){ return String(r.id) === String(id); })[0] || (state[stateKey] ? state[stateKey][id] : null);
     var mine = current && current.updatedBy === (state.currentUser&&state.currentUser.email) && new Date(current.updatedAt).getTime() >= startedAt - 3000;
     var fieldsMatch = mine && Object.keys(data).every(function(k){ return sameValue(current[k], data[k]); });
+    // ============ TEMPORARY DIAGNOSTIC — DEALS ONLY — REMOVE AFTER DEBUGGING ============
+    if (sheetName === 'deals' && mine && !fieldsMatch){
+      console.log('%cDEAL VERIFY DIAGNOSTIC \u2014 mine=true, fieldsMatch=false', 'font-weight:bold;font-size:13px;color:#b45309;');
+      console.log({
+        dealId: id,
+        expectedVersion: expectedVersion,
+        returnedVersion: current && current._version,
+        updatedBy: current && current.updatedBy,
+        currentUserEmail: state.currentUser && state.currentUser.email,
+        mine: mine
+      });
+      Object.keys(data).forEach(function(k){
+        var submitted = data[k];
+        var authoritative = current ? current[k] : undefined;
+        console.log({
+          field: k,
+          submittedValue: submitted,
+          authoritativeValue: authoritative,
+          submittedType: typeof submitted,
+          authoritativeType: typeof authoritative,
+          sameValueResult: sameValue(authoritative, submitted)
+        });
+      });
+    }
+    if (sheetName === 'deals'){
+      console.log('%cDEAL VERIFY \u2014 about to classify', 'font-weight:bold;font-size:13px;color:#1d4ed8;', {
+        dealId: id,
+        mine: mine,
+        fieldsMatch: fieldsMatch,
+        expectedVersion: expectedVersion,
+        currentVersion: current && current._version
+      });
+    }
+    // ============ END TEMPORARY DIAGNOSTIC ============
     if (mine && fieldsMatch){
       setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle();
       return { status:'saved', record: current };
