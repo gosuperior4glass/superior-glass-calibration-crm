@@ -973,6 +973,13 @@
   function fmtMoneyPrecise(n){ n = Number(n)||0; return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
   function dealBalance(d){ return Math.max(0, Number(d.finalInvoice||d.quoteAmount||0) - Number(d.amountPaid||0)); }
   function esc(s){ if (s===undefined || s===null) return ''; return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function attachmentIcon(mimeType){
+    mimeType = mimeType || '';
+    if (mimeType.indexOf('image/') === 0) return '\uD83D\uDCF7';
+    if (mimeType === 'application/pdf') return '\uD83D\uDCC4';
+    if (mimeType.indexOf('video/') === 0) return '\uD83C\uDFA5';
+    return '\uD83D\uDCCE';
+  }
   function uid(){ return 'id-' + Math.random().toString(36).slice(2,10) + Date.now().toString(36); }
   function nowIso(){ return new Date().toISOString(); }
   function daysAgo(iso){
@@ -1233,6 +1240,70 @@
     state.followups[finalId] = merged;
     persistLocal();
     return confirmedWrite('followups', finalId, data, 0, options);
+  }
+  var ATTACHMENT_ALLOWED_TYPES = { 'image/jpeg':true, 'image/png':true, 'image/webp':true, 'image/heic':true, 'image/heif':true, 'application/pdf':true };
+  var ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+  // Deliberately NOT updateDeal()/confirmedWrite()/verifyWrite() — the
+  // client can't safely predict the resulting attachments array (another
+  // upload could land concurrently), so this is its own path: POST the
+  // file, then verify by checking for this exact uploadId in a fresh
+  // authoritative read — the same "don't trust an unconfirmed write"
+  // principle as everywhere else, just matched on id instead of field
+  // values. Never predicts a version; handleSaveDeal() on the backend
+  // owns that entirely.
+  async function uploadAttachment(dealId, file){
+    var statusEl = document.getElementById('dm-attach-status');
+    var btn = document.getElementById('dm-add-attachment');
+    function setStatus(msg){ if (statusEl) statusEl.textContent = msg || ''; }
+
+    if (!ATTACHMENT_ALLOWED_TYPES[file.type]){
+      setStatus('That file type isn\u2019t supported. Use a JPG, PNG, WebP, HEIC, or PDF.');
+      return;
+    }
+    if (file.size > ATTACHMENT_MAX_BYTES){
+      setStatus('That file is too large \u2014 attachments are limited to 10 MB.');
+      return;
+    }
+
+    var uploadId = uid();
+    if (btn) btn.disabled = true;
+    setStatus('Uploading\u2026');
+
+    var base64;
+    try {
+      base64 = await new Promise(function(resolve, reject){
+        var reader = new FileReader();
+        reader.onload = function(){ resolve(String(reader.result).split(',')[1] || ''); };
+        reader.onerror = function(){ reject(new Error('read_failed')); };
+        reader.readAsDataURL(file);
+      });
+    } catch (e){
+      setStatus('Couldn\u2019t read that file \u2014 try again.');
+      if (btn) btn.disabled = false;
+      return;
+    }
+
+    apiPostRaw({ action:'uploadAttachment', data:{ dealId:dealId, uploadId:uploadId, filename:file.name, mimeType:file.type, base64:base64 } });
+
+    var confirmed = false;
+    for (var attempt = 0; attempt < 6; attempt++){
+      await sleep(1000);
+      var snap;
+      try { snap = await apiGetAll(); } catch(e){ snap = null; }
+      if (snap && snap.ok){
+        applyRemoteSnapshot(snap); // updates state.deals and re-renders, same as every other read
+        var deal = state.deals[dealId];
+        var atts = [];
+        if (deal && deal.attachments){ try { var p = JSON.parse(deal.attachments); if (Array.isArray(p)) atts = p; } catch(e){ atts = []; } }
+        if (atts.some(function(a){ return a && a.id === uploadId; })){ confirmed = true; break; }
+      }
+    }
+
+    if (btn) btn.disabled = false;
+    setStatus(confirmed ? '' : 'Not synced \u2014 check your connection and try again.');
+    if (confirmed && state.openDealModalId === dealId && document.getElementById('dm-attach-list')) {
+      openDealModal(dealId); // re-render the open modal so the new attachment appears without a page refresh
+    }
   }
   function saveDailyWeeklyTargets(data, options){
     var existing = state.metaRecords ? state.metaRecords['dailyWeeklyTargets'] : null;
@@ -3123,10 +3194,15 @@
   }
 
   function openDealModal(dealId){
+    state.openDealModalId = dealId || null;
     var editing = dealId ? state.deals[dealId] : null;
     var contact = editing ? state.contacts[editing.contactId] : null;
     var contactNames = Object.keys(state.contacts).map(function(k){ return state.contacts[k].name; });
     var links = (editing && editing.attachmentLinks) ? editing.attachmentLinks.split('\n').filter(Boolean) : [];
+    var structuredAttachments = [];
+    if (editing && editing.attachments) {
+      try { var parsedAtt = JSON.parse(editing.attachments); if (Array.isArray(parsedAtt)) structuredAttachments = parsedAtt; } catch (e) { structuredAttachments = []; }
+    }
 
     modalBox.innerHTML =
       '<div class="modal-head"><div class="modal-title">'+(editing ? 'Edit opportunity' : 'New opportunity')+'</div><button class="modal-close" id="dm-close">&times;</button></div>' +
@@ -3169,6 +3245,14 @@
             (editing ? '<div class="form-field full" style="font-size:12.5px;color:var(--color-text-muted);">Balance due: <strong style="color:var(--color-text);">'+fmtMoneyPrecise(Math.max(0, Number(editing.finalInvoice||editing.quoteAmount||0) - Number(editing.amountPaid||0)))+'</strong></div>' : '') +
           '</div></details>' +
           '<details class="form-section"><summary>Photos &amp; documents</summary>' +
+            (editing ?
+              '<div id="dm-attach-list">'+structuredAttachments.map(function(a){
+                return '<div class="task-row" style="padding:8px 0;"><span style="flex:1;min-width:0;overflow-wrap:anywhere;">'+attachmentIcon(a.mimeType)+' '+esc(a.filename||'attachment')+'</span><a class="btn btn-ghost btn-sm" href="'+esc(a.url||'')+'" target="_blank" rel="noopener">View</a></div>';
+              }).join('')+'</div>' +
+              '<input type="file" id="dm-attach-file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" style="display:none;">' +
+              '<button type="button" class="btn btn-ghost btn-sm" id="dm-add-attachment" style="margin:6px 0;">+ Add attachment</button>' +
+              '<div id="dm-attach-status" style="font-size:12px;color:var(--color-text-muted);"></div>'
+            : '<div class="page-sub" style="margin:0 0 8px;">Save the opportunity first to attach photos or documents.</div>') +
             '<div class="form-field full"><label for="dm-attachments">Links (one per line &mdash; paste from Google Drive, Photos, etc.)</label><textarea id="dm-attachments" placeholder="https://...">'+esc(editing ? editing.attachmentLinks : '')+'</textarea></div>' +
             (links.length ? '<div class="attach-links">'+links.map(function(l){ return '<a href="'+esc(l)+'" target="_blank" rel="noopener">'+esc(l)+'</a>'; }).join('')+'</div>' : '') +
           '</details>' +
@@ -3203,6 +3287,17 @@
       if (addTaskBtn){ addTaskBtn.addEventListener('click', function(){ openTaskModal(null, dealId); }); }
       var logFollowupBtn = document.getElementById('dm-log-followup');
       if (logFollowupBtn){ logFollowupBtn.addEventListener('click', function(){ openLogFollowupModal(editing.contactId||null, dealId); }); }
+      var addAttachmentBtn = document.getElementById('dm-add-attachment');
+      var attachFileInput = document.getElementById('dm-attach-file');
+      if (addAttachmentBtn && attachFileInput){
+        addAttachmentBtn.addEventListener('click', function(){ attachFileInput.click(); });
+        attachFileInput.addEventListener('change', function(){
+          if (attachFileInput.files && attachFileInput.files[0]){
+            uploadAttachment(dealId, attachFileInput.files[0]);
+          }
+          attachFileInput.value = ''; // allow re-selecting the same file later
+        });
+      }
     }
     document.getElementById('deal-form').addEventListener('submit', async function(e){
       e.preventDefault();
