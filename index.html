@@ -1006,6 +1006,16 @@
     date = date || new Date();
     return date.getFullYear() + '-' + String(date.getMonth()+1).padStart(2,'0') + '-' + String(date.getDate()).padStart(2,'0');
   }
+  // Single source of truth for "is this deal currently in the Scheduled
+  // stage" — used by both Schedule and Technician View so they can't drift
+  // apart on this specific question again. Deliberately just the stage
+  // check: date/time handling differs between the two screens (Schedule
+  // excludes once the appointment time passes; Technician View doesn't),
+  // so that logic stays separate in each caller rather than being forced
+  // into one shared rule that wouldn't fit both.
+  function isCurrentlyScheduled(deal){
+    return !!deal && deal.stage === 'scheduled';
+  }
   function getMonthBounds(offset){
     var d = new Date();
     var start = new Date(d.getFullYear(), d.getMonth() + offset, 1);
@@ -2116,7 +2126,30 @@
 
   // ---------- schedule ----------
   function renderSchedule(){
-    var deals = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){ return d.scheduledDate; });
+    var todayKey = localDateKey();
+    var now = new Date();
+    // RULE B (Upcoming Schedule): an opportunity only belongs here if it is
+    // BOTH currently in the active Scheduled stage (matching Pipeline's own
+    // definition exactly — reusing the same stage, not a different field)
+    // AND its appointment hasn't already passed. Previously this only
+    // checked "does scheduledDate exist" — which stays true forever, even
+    // after the job is moved backward to an earlier stage or the date
+    // itself is long past, which is why old, no-longer-scheduled jobs kept
+    // showing up here indefinitely.
+    var deals = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){
+      if (!isCurrentlyScheduled(d)) return false;
+      if (!d.scheduledDate) return false;
+      if (d.scheduledDate < todayKey) return false;
+      if (d.scheduledDate === todayKey && d.scheduledTime){
+        // Today, with a specific time set — exclude only if that exact
+        // moment has already passed. No time set means it's shown all day,
+        // so a legitimate today's job is never accidentally hidden just
+        // because the CRM can't tell "earlier" from "later" today.
+        var apptMoment = new Date(d.scheduledDate + 'T' + d.scheduledTime);
+        if (!isNaN(apptMoment.getTime()) && apptMoment < now) return false;
+      }
+      return true;
+    });
     deals.sort(function(a,b){ return new Date(a.scheduledDate) - new Date(b.scheduledDate); });
     var wrap = document.getElementById('agenda-list');
     if (deals.length === 0){ wrap.innerHTML = '<div class="empty-note">No jobs scheduled yet. Add a scheduled date from an opportunity\'s details.</div>'; return; }
@@ -2249,7 +2282,16 @@
     var funnel = {
       opps: cohort.length,
       quotes: cohort.filter(function(d){ return !!d.quoteSentAt; }).length,
-      scheduled: cohort.filter(function(d){ return !!d.scheduledDate; }).length,
+      // scheduledAt is the "reached Scheduled" milestone timestamp — set
+      // once, preserved if the deal moves forward, cleared only if moved
+      // backward before Scheduled. This is the correct field for a
+      // reached-this-milestone funnel step, matching how Quotes already
+      // works via quoteSentAt below. scheduledDate (the appointment date
+      // itself) was used here previously — it has nothing to do with stage
+      // history, is never cleared, and doesn't distinguish current from
+      // long-past-and-moved-on opportunities, which is why this step could
+      // disagree with Pipeline's live Scheduled count.
+      scheduled: cohort.filter(function(d){ return !!d.scheduledAt; }).length,
       completed: cohort.filter(function(d){ return d.stage==='job_completed' || isRealized(d.stage); }).length,
       // "Fully Paid" — deliberately NOT isRealized(stage). Being in the
       // Payment Received/Customer Follow-up stage is a workflow milestone,
@@ -2321,15 +2363,15 @@
       var steps = [
         { label:'Opportunities', count:f.opps, note:'' },
         { label:'Quotes', count:f.quotes, note:'' },
-        { label:'Scheduled', count:f.scheduled, note:'current-stage estimate' },
-        { label:'Job completed', count:f.completed, note:'current-stage estimate' },
+        { label:'Scheduled', count:f.scheduled, note:'reached this stage' },
+        { label:'Job completed', count:f.completed, note:'reached this stage' },
         { label:'Fully paid', count:f.fullyPaid, note:'' }
       ];
       funnelWrap.innerHTML = steps.map(function(s,i){
         var pct = f.opps ? Math.round((s.count/f.opps)*100) : 0;
         var conv = i>0 && steps[i-1].count ? Math.round((s.count/steps[i-1].count)*100)+'% of previous' : '';
         return '<div class="bar-list-row"><div class="blr-top"><span class="blr-name">'+esc(s.label)+(s.note?' <span style="color:var(--color-text-muted);font-weight:400;">('+esc(s.note)+')</span>':'')+'</span><span class="blr-count">'+s.count+(conv?' \u00b7 '+esc(conv):'')+'</span></div><div class="bar-track"><div class="bar-fill" style="width:'+pct+'%;"></div></div></div>';
-      }).join('') + '<div class="empty-note" style="margin-top:4px;">\u201cScheduled\u201d and \u201cJob completed\u201d reflect each opportunity\u2019s current stage, not a confirmed timeline \u2014 the CRM only timestamps when a job was quoted and when payment was received. A job that skipped a stage is counted at whichever stages it actually has data for.</div>';
+      }).join('') + '<div class="empty-note" style="margin-top:4px;">\u201cScheduled\u201d and \u201cJob completed\u201d count opportunities that reached that stage at some point \u2014 including ones that have since moved further along, like a completed job counting toward both steps. This can differ from Pipeline\u2019s live count, which only shows opportunities currently sitting in that exact stage today. An opportunity moved backward before reaching a stage is not counted toward it.</div>';
     }
 
     var typeKeys = Object.keys(data.byType).filter(function(k){ return data.byType[k].total > 0 || data.byType[k].won > 0; }).sort(function(a,b){ return data.byType[b].total - data.byType[a].total; });
@@ -2432,8 +2474,8 @@
     lines.push(['Stage','Count'].map(csvEscape).join(','));
     lines.push(['Opportunities', data.funnel.opps].map(csvEscape).join(','));
     lines.push(['Quotes', data.funnel.quotes].map(csvEscape).join(','));
-    lines.push(['Scheduled (current-stage estimate)', data.funnel.scheduled].map(csvEscape).join(','));
-    lines.push(['Job completed (current-stage estimate)', data.funnel.completed].map(csvEscape).join(','));
+    lines.push(['Scheduled (reached this stage)', data.funnel.scheduled].map(csvEscape).join(','));
+    lines.push(['Job completed (reached this stage)', data.funnel.completed].map(csvEscape).join(','));
     lines.push(['Fully paid (finalInvoice > 0 and amountPaid >= finalInvoice)', data.funnel.fullyPaid].map(csvEscape).join(','));
     lines.push('');
     lines.push(csvEscape('By service type'));
@@ -2846,8 +2888,14 @@
     // Schedule, which never applied that filter to begin with).
     var deals = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){ return !d.archived; });
     var todayKey = localDateKey();
-    var todays = deals.filter(function(d){ return d.scheduledDate === todayKey; }).sort(function(a,b){ return (a.scheduledTime||'').localeCompare(b.scheduledTime||''); });
-    var list = todays.length ? todays : deals.filter(function(d){ return d.stage === 'scheduled'; }).slice(0, 6);
+    // A job must be BOTH currently in the Scheduled stage AND dated today —
+    // scheduledDate alone never establishes "still scheduled" (that's what
+    // caused a stale date to wrongly surface a job that had since moved
+    // backward or forward). Deliberately no time-of-day exclusion here,
+    // unlike Schedule — a technician needs to see today's job all day,
+    // even after its appointment time, until its stage actually changes.
+    var todays = deals.filter(function(d){ return isCurrentlyScheduled(d) && d.scheduledDate === todayKey; }).sort(function(a,b){ return (a.scheduledTime||'').localeCompare(b.scheduledTime||''); });
+    var list = todays.length ? todays : deals.filter(isCurrentlyScheduled).slice(0, 6);
     var wrap = document.getElementById('field-list');
     if (list.length === 0){ wrap.innerHTML = '<div class="empty-note">No scheduled jobs. Add a scheduled date to any opportunity to see it here.</div>'; return; }
     wrap.innerHTML = '';
@@ -3209,7 +3257,20 @@
       (editing && editing.updatedBy ? '<div class="last-updated-line" style="margin-top:-10px;">'+lastUpdatedLine(editing)+'</div>' : '') +
       '<form id="deal-form">' +
         (editing ?
-          '<div class="form-field full"><label>Contact</label><div style="padding:8px 0;font-size:13.5px;">'+esc(contact ? contact.name : (editing.contactName||'Unknown'))+'</div></div>'
+          '<div class="form-field full"><label>Contact</label><div style="padding:8px 0;font-size:13.5px;">'+esc(contact ? contact.name : (editing.contactName||'Unknown'))+'</div></div>' +
+          // Additive display only — Contact remains the sole source of
+          // truth for phone/email/address; nothing here is copied onto
+          // the Deal. Gracefully shows only whatever fields the Contact
+          // actually has, and nothing at all if the Contact can't be
+          // resolved, rather than erroring.
+          (contact && (contact.phone || contact.email || contact.address) ?
+            '<div class="section-label" style="margin-top:2px;">Customer contact information</div>' +
+            '<div class="form-field full" style="margin-top:-6px;">' +
+              (contact.phone ? '<div style="margin-bottom:6px;"><div style="font-size:11.5px;color:var(--color-text-muted);">Phone</div><a href="tel:'+esc(String(contact.phone).replace(/[^0-9+]/g,''))+'" style="font-size:13.5px;">'+esc(contact.phone)+'</a></div>' : '') +
+              (contact.email ? '<div style="margin-bottom:6px;"><div style="font-size:11.5px;color:var(--color-text-muted);">Email</div><a href="mailto:'+esc(contact.email)+'" style="font-size:13.5px;">'+esc(contact.email)+'</a></div>' : '') +
+              (contact.address ? '<div><div style="font-size:11.5px;color:var(--color-text-muted);">Address</div><a href="https://maps.google.com/?q='+encodeURIComponent(contact.address)+'" target="_blank" rel="noopener" style="font-size:13.5px;">'+esc(contact.address)+'</a></div>' : '') +
+            '</div>'
+          : '')
           :
           '<div class="form-grid">' +
             '<div class="form-field full"><label for="dm-contact-name">Contact name</label><input list="contact-names" id="dm-contact-name" required></div>' +
