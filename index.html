@@ -606,7 +606,7 @@
             <h1 class="page-title">Contacts</h1>
             <div class="page-sub">Everyone you've quoted, met, or worked with.</div>
           </div>
-          <div class="head-actions"><button class="btn btn-ghost" id="export-contacts-btn">Export contacts (CSV)</button><button class="btn btn-ghost" id="merge-dupes-btn">Merge duplicate contacts</button><button class="btn btn-primary" id="add-contact-btn">+ New contact</button></div>
+          <div class="head-actions"><button class="btn btn-ghost" id="export-contacts-btn">Export contacts (CSV)</button><button class="btn btn-primary" id="add-contact-btn">+ New contact</button></div>
         </div>
         <div class="search-row">
           <input class="search-input" id="contact-search" type="text" placeholder="Search by name, company, phone, or email">
@@ -2961,7 +2961,6 @@
   }
   document.getElementById('contact-search').addEventListener('input', function(e){ state.contactSearch = e.target.value; renderContacts(); });
   document.getElementById('add-contact-btn').addEventListener('click', function(){ openContactModal(null); });
-  document.getElementById('merge-dupes-btn').addEventListener('click', function(){ mergeDuplicateContacts(); });
   document.getElementById('export-contacts-btn').addEventListener('click', function(){ exportContactsCsv(); });
   function exportContactsCsv(){
     var term = state.contactSearch.trim().toLowerCase();
@@ -2981,52 +2980,6 @@
       ].map(csvEscape).join(','));
     });
     downloadCsv('superior-glass-contacts.csv', lines.join('\n'));
-  }
-  function findDuplicateContactGroups(){
-    var groups = {};
-    Object.keys(state.contacts).forEach(function(id){
-      var c = state.contacts[id];
-      var key = (c.name||'').trim().toLowerCase();
-      if (!key) return;
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(c);
-    });
-    var dupGroups = [];
-    Object.keys(groups).forEach(function(key){
-      if (groups[key].length > 1){
-        groups[key].sort(function(a,b){ return new Date(a.createdAt||0) - new Date(b.createdAt||0); });
-        dupGroups.push(groups[key]);
-      }
-    });
-    return dupGroups;
-  }
-  function mergeDuplicateContacts(){
-    var groups = findDuplicateContactGroups();
-    if (groups.length === 0){
-      openConfirmModal('No duplicates found', 'Every contact name is unique right now.', 'OK', function(){});
-      return;
-    }
-    var totalDupes = groups.reduce(function(s,g){ return s + g.length - 1; }, 0);
-    openConfirmModal(
-      'Merge ' + groups.length + ' duplicate name' + (groups.length===1?'':'s') + '?',
-      'For each name, the oldest record is kept, any linked opportunities are moved over to it, and the other ' + totalDupes + ' duplicate record' + (totalDupes===1?'':'s') + ' will be removed. This can\'t be undone.',
-      'Merge duplicates',
-      function(){ runContactMerge(groups); }
-    );
-  }
-  function runContactMerge(groups){
-    groups.forEach(function(group){
-      var keep = group[0];
-      for (var i=1;i<group.length;i++){
-        var dupe = group[i];
-        Object.keys(state.deals).forEach(function(dealId){
-          if (state.deals[dealId].contactId === dupe.id){
-            updateDeal(dealId, { contactId: keep.id, contactName: keep.name });
-          }
-        });
-        deleteContact(dupe.id);
-      }
-    });
   }
   document.querySelectorAll('#account-filter button').forEach(function(btn){
     btn.addEventListener('click', function(){
