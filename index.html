@@ -3,6 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- PWA metadata — Phase 1 foundation. Colors match the CRM's own existing
+     branding (--color-sidebar-bg); icons derive from the existing Superior
+     Glass logo already used on the login screen. -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#071A42">
+<link rel="icon" type="image/png" href="favicon-32.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Superior Glass">
 <title>Pipeline &mdash; Superior Glass and Calibration</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -3657,6 +3668,85 @@
   })();
 
 })();
+</script>
+
+<!-- ============================================================
+     PWA Phase 1: service worker registration + minimal install
+     prompt capture. Deliberately isolated in its own script tag,
+     with its own error handling, so it can never affect or break
+     the CRM above regardless of browser support or failure.
+     Nothing here touches authentication, business logic, or any
+     of the CRM's own state/network calls.
+     ============================================================ -->
+<style>
+  #sgc-install-btn { display:none; position:fixed; right:16px; bottom:16px; z-index:500;
+    background:#071A42; color:#F5F4EF; border:1px solid #D69A34; border-radius:10px;
+    padding:10px 14px; font:600 13px var(--font-body, sans-serif); cursor:pointer;
+    box-shadow:0 2px 8px rgba(0,0,0,0.25); align-items:center; gap:8px; }
+  #sgc-install-btn.show { display:flex; }
+  #sgc-install-dismiss { background:none; border:none; color:#ABB6DC; font-size:15px; cursor:pointer; line-height:1; padding:0 0 0 4px; }
+</style>
+<div id="sgc-install-btn" role="button" tabindex="0"><span>Install app</span><button id="sgc-install-dismiss" type="button" aria-label="Dismiss">&times;</button></div>
+<script>
+  (function(){
+    try {
+      // Service worker registration — same-origin relative path, so this
+      // works correctly under whatever subpath the CRM is actually hosted
+      // at (e.g. GitHub Pages project path), not just at a domain root.
+      // A failure or lack of support here is silently non-fatal: the CRM
+      // must keep working exactly as before either way.
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function(){
+          navigator.serviceWorker.register('service-worker.js').catch(function(err){
+            console.log('Service worker registration skipped/failed (CRM unaffected):', err);
+          });
+        });
+      }
+    } catch (e) { console.log('PWA registration step skipped:', e); }
+
+    try {
+      // Minimal Android/Chrome install affordance. Captures the browser's
+      // own install prompt event and shows a small, dismissible button —
+      // no custom install flow, no popup, no repeated nagging beyond one
+      // simple dismiss per session. iOS has no equivalent event; no UI is
+      // shown there in this phase, per plan.
+      var deferredPrompt = null;
+      var btn = document.getElementById('sgc-install-btn');
+      var dismissBtn = document.getElementById('sgc-install-dismiss');
+      var isStandalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+      var dismissedKey = 'sgc-install-dismissed';
+
+      window.addEventListener('beforeinstallprompt', function(e){
+        if (isStandalone) return;
+        try { if (sessionStorage.getItem(dismissedKey)) return; } catch(e2){}
+        e.preventDefault();
+        deferredPrompt = e;
+        if (btn) btn.classList.add('show');
+      });
+
+      if (btn) {
+        btn.addEventListener('click', function(e){
+          if (e.target === dismissBtn) return;
+          if (!deferredPrompt) return;
+          deferredPrompt.prompt();
+          deferredPrompt.userChoice.finally(function(){
+            deferredPrompt = null;
+            btn.classList.remove('show');
+          });
+        });
+        btn.addEventListener('keydown', function(e){
+          if (e.target === dismissBtn) return;
+          if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); btn.click(); }
+        });
+      }
+      if (dismissBtn) {
+        dismissBtn.addEventListener('click', function(){
+          try { sessionStorage.setItem(dismissedKey, '1'); } catch(e2){}
+          btn.classList.remove('show');
+        });
+      }
+    } catch (e) { console.log('Install prompt step skipped:', e); }
+  })();
 </script>
 </body>
 </html>
