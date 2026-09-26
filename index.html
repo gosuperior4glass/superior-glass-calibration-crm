@@ -305,6 +305,7 @@
   #pipeline-mobile { display:none; }
   #pipeline-options-toggle { display:none; }
   #contacts-mobile { display:none; }
+  #schedule-mobile { display:none; }
 
   @media (max-width: 860px) {
     .app { flex-direction: column; }
@@ -334,6 +335,12 @@
     #contacts-search-row #contact-search { width:100%; }
     #contact-list { display:none; }
     #contacts-mobile { display:block; }
+    /* Schedule: desktop's plain agenda list is replaced on mobile by
+       #schedule-mobile's own Today/Tomorrow/Next 7 Days selector + grouped
+       cards. Same heading/subtitle above stays visible on both — no
+       redundant heading is added. */
+    #agenda-list { display:none; }
+    #schedule-mobile { display:block; }
   }
   /* Higher specificity (id+class) than the plain #pipeline-toolbar rule
      above, so this always wins once the class is toggled on, regardless
@@ -359,6 +366,7 @@
   .more-item:focus-visible, .bnav-item:focus-visible { outline:2px solid var(--color-accent); outline-offset:2px; }
   .more-item svg { width:19px; height:19px; flex-shrink:0; opacity:.8; }
   .tm-card { background: var(--color-surface); border:1px solid var(--color-border); border-radius:10px; padding:14px; margin-bottom:10px; box-shadow: var(--shadow-card); }
+  .tm-card[tabindex]:focus-visible { outline:2px solid var(--color-accent-2); outline-offset:2px; }
   .tm-title { font-weight:700; font-size:14.5px; margin-bottom:2px; }
   .tm-meta { font-size:12.5px; color: var(--color-text-muted); margin-bottom:2px; }
   .tm-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
@@ -676,6 +684,7 @@
           </div>
         </div>
         <div id="agenda-list"></div>
+        <div id="schedule-mobile"></div>
       </section>
 
       <section class="view" data-view="operations" hidden>
@@ -872,6 +881,7 @@
     sourceFilter: 'all',
     showArchived: false,
     mobilePipelineStage: 'all',
+    mobileScheduleRange: 'next7',
     reportsRange: 'alltime',
     reportsCustomFrom: '',
     reportsCustomTo: '',
@@ -1784,7 +1794,7 @@
     if (state.view === 'today'){ renderToday(); renderMobileToday(); }
     if (state.view === 'trends') renderTrends();
     if (state.view === 'reports') renderReports();
-    if (state.view === 'schedule') renderSchedule();
+    if (state.view === 'schedule'){ renderSchedule(); renderMobileSchedule(); }
     if (state.view === 'operations') renderOperations();
     if (state.view === 'field') renderFieldView();
     if (state.view === 'contacts'){ renderContacts(); renderMobileContacts(); }
@@ -2556,6 +2566,113 @@
       });
       wrap.appendChild(dayWrap);
     });
+  }
+
+  // ---------- mobile Schedule (Phase 2D) ----------
+  // Reuses the EXACT same authoritative predicate renderSchedule() already
+  // uses above (isCurrentlyScheduled + scheduledDate >= today + the
+  // existing "exclude only once today's specific appointment time has
+  // passed" rule) — duplicated the same way renderMobileToday()/
+  // renderMobilePipeline()/renderMobileContacts() already duplicate their
+  // desktop counterpart's filter rather than sharing a helper. This is
+  // NOT the Technician View rule (which keeps a job visible all day) —
+  // Schedule's own existing passed-appointment exclusion is preserved
+  // as-is. A Today/Tomorrow/Next 7 Days range is then applied ONLY on
+  // top of that already-correct set; it never changes which deals count
+  // as "scheduled" in the first place.
+  function renderMobileSchedule(){
+    var wrap = document.getElementById('schedule-mobile');
+    if (!wrap) return;
+    var todayKey = localDateKey();
+    var now = new Date();
+    var deals = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){
+      if (!isCurrentlyScheduled(d)) return false;
+      if (!d.scheduledDate) return false;
+      if (d.scheduledDate < todayKey) return false;
+      if (d.scheduledDate === todayKey && d.scheduledTime){
+        var apptMoment = new Date(d.scheduledDate + 'T' + d.scheduledTime);
+        if (!isNaN(apptMoment.getTime()) && apptMoment < now) return false;
+      }
+      return true;
+    });
+
+    var tomorrowKey = localDateKey(new Date(Date.now() + 86400000));
+    var next7EndKey = localDateKey(new Date(Date.now() + 6*86400000)); // today + 6 more days = 7 days total
+    var range = state.mobileScheduleRange;
+    var rangeLabel = { today:'today', tomorrow:'tomorrow', next7:'the next 7 days' }[range] || 'the next 7 days';
+    var shown = deals.filter(function(d){
+      if (range === 'today') return d.scheduledDate === todayKey;
+      if (range === 'tomorrow') return d.scheduledDate === tomorrowKey;
+      return d.scheduledDate <= next7EndKey; // next7 (default) — already >= todayKey from the base filter
+    }).sort(function(a,b){ return (a.scheduledDate+(a.scheduledTime||'')).localeCompare(b.scheduledDate+(b.scheduledTime||'')); });
+
+    wrap.innerHTML = '';
+    var seg = el(
+      '<div class="seg-control" id="sm-range" style="margin-bottom:16px;">' +
+        '<button type="button" data-range="today"'+(range==='today'?' class="active"':'')+'>Today</button>' +
+        '<button type="button" data-range="tomorrow"'+(range==='tomorrow'?' class="active"':'')+'>Tomorrow</button>' +
+        '<button type="button" data-range="next7"'+(range==='next7'?' class="active"':'')+'>Next 7 Days</button>' +
+      '</div>'
+    );
+    seg.querySelectorAll('button').forEach(function(btn){
+      btn.addEventListener('click', function(){ state.mobileScheduleRange = btn.getAttribute('data-range'); renderMobileSchedule(); });
+    });
+    wrap.appendChild(seg);
+
+    if (shown.length === 0){
+      wrap.appendChild(el('<div class="empty-note">No jobs scheduled for '+esc(rangeLabel)+'.</div>'));
+      return;
+    }
+
+    var groups = {};
+    var order = [];
+    shown.forEach(function(d){
+      var key = d.scheduledDate;
+      if (!groups[key]){ groups[key]=[]; order.push(key); }
+      groups[key].push(d);
+    });
+    order.forEach(function(key){
+      var dateLabel = new Date(key+'T00:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' });
+      wrap.appendChild(el('<div class="agenda-day-label" style="margin-top:14px;">'+esc(dateLabel)+'</div>'));
+      groups[key].forEach(function(d){ wrap.appendChild(scheduleMobileCard(d)); });
+    });
+  }
+  function scheduleMobileCard(d){
+    var contact = state.contacts[d.contactId];
+    var customerName = contact ? contact.name : d.contactName;
+    var phone = contact && contact.phone != null ? String(contact.phone) : '';
+    var phoneDigits = phone.replace(/[^0-9+]/g,'');
+    var address = contact ? contact.address : '';
+    var jt = JOB_TYPES.filter(function(j){ return j.id===d.jobType; })[0];
+    var timeLabel = d.scheduledTime ? esc(tmFormatTime(d.scheduledTime)) : 'Time not set';
+    function field(label, value){
+      if (!value) return '';
+      return '<div class="tm-field"><div class="tm-field-label">'+esc(label)+'</div><div class="tm-field-value">'+value+'</div></div>';
+    }
+    // No dedicated "Open job" button here (unlike mobile Today) — the whole
+    // card is the primary tap target, same as mobile Contacts' cards, so it
+    // gets the same role="button"/tabindex/keydown treatment for keyboard
+    // access instead.
+    var card = el(
+      '<div class="tm-card" role="button" tabindex="0">' +
+        '<div class="tm-top-row"><div class="tm-appt-time'+(d.scheduledTime?'':' unset')+'">'+timeLabel+'</div></div>' +
+        field('Customer', customerName ? esc(customerName) : '') +
+        field('Service', jt ? esc(jt.label) : '') +
+        field('Address', address ? esc(address) : '') +
+        '<div class="tm-actions">' +
+          (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="tel:'+esc(phoneDigits)+'">'+tmIcon('call')+'Call</a>' : '') +
+          (address ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(address)+'" target="_blank" rel="noopener">'+tmIcon('pin')+'Directions</a>' : '') +
+        '</div>' +
+      '</div>'
+    );
+    card.addEventListener('click', function(){ openDealModal(d.id); });
+    card.addEventListener('keydown', function(e){
+      if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); openDealModal(d.id); }
+    });
+    card.querySelectorAll('.tm-actions a').forEach(function(a){
+      a.addEventListener('click', function(e){ e.stopPropagation(); });
+    });
+    return card;
   }
 
   // ---------- today ----------
