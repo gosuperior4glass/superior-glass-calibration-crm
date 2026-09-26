@@ -302,6 +302,7 @@
   .loading-screen[hidden] { display:none; }
   .bottom-nav { display:none; }
   #today-mobile { display:none; }
+  #pipeline-mobile { display:none; }
 
   @media (max-width: 860px) {
     .app { flex-direction: column; }
@@ -313,6 +314,8 @@
     .main-inner { padding-bottom: calc(78px + env(safe-area-inset-bottom, 0px)); }
     #today-stats, #today-mobile-desktop-wrap { display:none; }
     #today-mobile { display:block; }
+    .kanban { display:none; }
+    #pipeline-mobile { display:block; }
   }
   .bottom-nav { position:fixed; left:0; right:0; bottom:0; z-index:400;
     background: var(--color-sidebar-bg); border-top:1px solid var(--color-sidebar-bg-2);
@@ -352,6 +355,20 @@
   .tm-actions svg { width:15px; height:15px; flex-shrink:0; }
   .tm-upcoming-time { font-weight:700; flex-shrink:0; }
   .tm-view-schedule { display:block; text-align:center; padding:11px; font-size:12.5px; font-weight:600; color: var(--color-accent-2); cursor:pointer; background:none; border:none; width:100%; }
+
+  .pm-stage-scroll { display:flex; gap:8px; overflow-x:auto; -webkit-overflow-scrolling:touch; padding: 2px 2px 12px; margin-bottom:4px; }
+  .pm-chip { flex-shrink:0; display:inline-flex; align-items:center; gap:6px; background: var(--color-surface); border:1px solid var(--color-border); border-radius:20px; padding:8px 14px; font-size:12.5px; font-weight:600; color: var(--color-text); cursor:pointer; white-space:nowrap; }
+  .pm-chip .count-badge { background: var(--color-surface-2); border-radius:10px; padding:1px 7px; font-size:11px; color: var(--color-text-muted); font-weight:700; }
+  .pm-chip.active { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-accent-ink); }
+  .pm-chip.active .count-badge { background: rgba(0,0,0,0.15); color: inherit; }
+  .pm-chip:focus-visible { outline:2px solid var(--color-accent-2); outline-offset:2px; }
+  .pm-card { background: var(--color-surface); border:1px solid var(--color-border); border-radius:10px; padding:14px; margin-bottom:10px; box-shadow: var(--shadow-card); width:100%; text-align:left; cursor:pointer; font:inherit; color:inherit; }
+  .pm-card:focus-visible { outline:2px solid var(--color-accent-2); outline-offset:2px; }
+  .pm-card-top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:4px; }
+  .pm-card-title { font-weight:700; font-size:14.5px; word-break:break-word; }
+  .pm-card-meta { font-size:12.5px; color: var(--color-text-muted); margin-top:2px; word-break:break-word; }
+  .pm-card-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; }
+  .pm-card-amount { font-weight:700; font-size:13.5px; }
     .topbar-nav button { background:none; border:none; color: var(--color-sidebar-text); padding:7px 9px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }
     .topbar-nav button.active { background: var(--color-sidebar-bg-2); color: var(--color-sidebar-text-active); }
     .main-inner { padding: 20px 16px 70px; }
@@ -509,6 +526,7 @@
           </label>
         </div>
         <div class="kanban" id="kanban"></div>
+        <div id="pipeline-mobile"></div>
       </section>
 
       <section class="view" data-view="today" hidden>
@@ -810,6 +828,7 @@
     remoteConnected: false,
     sourceFilter: 'all',
     showArchived: false,
+    mobilePipelineStage: 'all',
     reportsRange: 'alltime',
     reportsCustomFrom: '',
     reportsCustomTo: '',
@@ -1329,6 +1348,83 @@
     }
   }
 
+  // ---------- mobile Pipeline (phone-friendly stage view) ----------
+  // Phase 3: at <=860px, replaces the desktop Kanban board with a stage
+  // chip selector + a single vertical card list. Reuses the SAME STAGES
+  // config, the same current-stage field (d.stage), the same
+  // showArchived/sourceFilter state and applySourceFilter() the desktop
+  // Kanban uses, and the same openDealModal()/openDealModal(null) flow.
+  // No new stage-transition path — stage changes still only happen through
+  // the existing Opportunity modal (stageTransitionPatch is untouched and
+  // not called from here).
+  function renderMobilePipeline(){
+    var wrap = document.getElementById('pipeline-mobile');
+    var allDeals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
+    var deals = state.showArchived ? allDeals : allDeals.filter(function(d){ return !d.archived; });
+    // Same per-column ordering the desktop Kanban already uses (newest
+    // created first). "All" simply reads the stages in their existing
+    // canonical order and concatenates each stage's deals in that same
+    // order — the same thing as scanning the Kanban board left-to-right,
+    // top-to-bottom. No new field or timestamp is introduced.
+    function stageDeals(stageId){
+      return deals.filter(function(d){ return d.stage === stageId; })
+        .sort(function(a,b){ return new Date(b.createdAt||0) - new Date(a.createdAt||0); });
+    }
+    var byStage = {};
+    STAGES.forEach(function(st){ byStage[st.id] = stageDeals(st.id); });
+    var allOrdered = [];
+    STAGES.forEach(function(st){ allOrdered = allOrdered.concat(byStage[st.id]); });
+
+    var validStageIds = STAGES.map(function(st){ return st.id; });
+    if (state.mobilePipelineStage !== 'all' && validStageIds.indexOf(state.mobilePipelineStage) === -1){
+      state.mobilePipelineStage = 'all';
+    }
+    var shown = state.mobilePipelineStage === 'all' ? allOrdered : byStage[state.mobilePipelineStage] || [];
+
+    wrap.innerHTML = '';
+    var scroll = el('<div class="pm-stage-scroll"></div>');
+    function makeChip(id, label, count){
+      var chip = el('<button type="button" class="pm-chip'+(state.mobilePipelineStage===id?' active':'')+'">'+esc(label)+' <span class="count-badge">'+count+'</span></button>');
+      chip.addEventListener('click', function(){ state.mobilePipelineStage = id; renderMobilePipeline(); });
+      return chip;
+    }
+    scroll.appendChild(makeChip('all', 'All', deals.length));
+    STAGES.forEach(function(st){ scroll.appendChild(makeChip(st.id, st.label, byStage[st.id].length)); });
+    wrap.appendChild(scroll);
+
+    var list = el('<div></div>');
+    if (shown.length === 0){
+      list.appendChild(el('<div class="empty-note">No opportunities in this stage.</div>'));
+    } else {
+      shown.forEach(function(d){ list.appendChild(pipelineCard(d)); });
+    }
+    wrap.appendChild(list);
+  }
+  function pipelineCard(d){
+    var contact = state.contacts[d.contactId];
+    var customerName = contact ? contact.name : d.contactName;
+    var jt = JOB_TYPES.filter(function(j){ return j.id===d.jobType; })[0];
+    var st = stageInfo(d.stage);
+    var metaBits = [];
+    if (d.vehicle) metaBits.push(esc(d.vehicle));
+    if (jt) metaBits.push(esc(jt.label));
+    if (d.source) metaBits.push(esc(d.source));
+    if (d.scheduledDate) metaBits.push(esc(d.scheduledDate) + (d.scheduledTime ? ' ' + esc(tmFormatTime(d.scheduledTime)) : ''));
+    var card = el(
+      '<button type="button" class="pm-card">' +
+        '<div class="pm-card-top">' +
+          '<div class="pm-card-title">'+esc(customerName || d.title || 'Untitled job')+'</div>' +
+          '<span class="role-badge" style="background:'+st.bgDot+';color:#fff;flex-shrink:0;">'+esc(st.label)+'</span>' +
+        '</div>' +
+        (customerName && d.title ? '<div class="pm-card-meta">'+esc(d.title)+'</div>' : '') +
+        (metaBits.length ? '<div class="pm-card-meta">'+metaBits.join(' &middot; ')+'</div>' : '') +
+        '<div class="pm-card-foot"><span class="pm-card-amount">'+(d.quoteAmount ? fmtMoneyPrecise(d.quoteAmount) : '&mdash;')+'</span></div>' +
+      '</button>'
+    );
+    card.addEventListener('click', function(){ openDealModal(d.id); });
+    return card;
+  }
+
   // ---------- persistence ----------
   // Every write updates local state immediately (so the UI never waits on
   // the network) and shows "Saving...". A follow-up authenticated read then
@@ -1640,7 +1736,7 @@
   // ---------- render shell ----------
   function render(){
     if (state.view === 'dashboard') renderDashboard();
-    if (state.view === 'pipeline') renderPipeline();
+    if (state.view === 'pipeline'){ renderPipeline(); renderMobilePipeline(); }
     if (state.view === 'today'){ renderToday(); renderMobileToday(); }
     if (state.view === 'trends') renderTrends();
     if (state.view === 'reports') renderReports();
@@ -2206,7 +2302,7 @@
     });
   }
   document.getElementById('add-deal-btn').addEventListener('click', function(){ openDealModal(null); });
-  document.getElementById('show-archived-toggle').addEventListener('change', function(e){ state.showArchived = e.target.checked; renderPipeline(); });
+  document.getElementById('show-archived-toggle').addEventListener('change', function(e){ state.showArchived = e.target.checked; renderPipeline(); renderMobilePipeline(); });
   document.getElementById('archive-old-btn').addEventListener('click', function(){
     var cutoff = Date.now() - 30*86400000;
     var candidates = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){
