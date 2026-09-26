@@ -336,6 +336,22 @@
   .tm-title { font-weight:700; font-size:14.5px; margin-bottom:2px; }
   .tm-meta { font-size:12.5px; color: var(--color-text-muted); margin-bottom:2px; }
   .tm-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .tm-header { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  .tm-header .section-label { margin-bottom:2px; }
+  .tm-date { font-size:13px; color: var(--color-text-muted); margin-bottom:2px; }
+  .tm-header #tm-new-opp { flex-shrink:0; white-space:nowrap; }
+  .tm-summary { font-size:12px; color: var(--color-text-muted); margin: 10px 0 16px; }
+  .tm-top-row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+  .tm-appt-time { font-family: var(--font-display); font-weight:700; font-size:17px; color: var(--color-accent-2); }
+  .tm-appt-time.unset { font-size:12.5px; font-weight:600; color: var(--color-text-muted); font-family: var(--font-body); }
+  .tm-field { margin-bottom:7px; }
+  .tm-field:last-of-type { margin-bottom:0; }
+  .tm-field-label { font-size:10.5px; font-weight:700; letter-spacing:.03em; color: var(--color-text-muted); text-transform:uppercase; }
+  .tm-field-value { font-size:13.5px; word-break:break-word; }
+  .tm-actions .btn { min-height:38px; }
+  .tm-actions svg { width:15px; height:15px; flex-shrink:0; }
+  .tm-upcoming-time { font-weight:700; flex-shrink:0; }
+  .tm-view-schedule { display:block; text-align:center; padding:11px; font-size:12.5px; font-weight:600; color: var(--color-accent-2); cursor:pointer; background:none; border:none; width:100%; }
     .topbar-nav button { background:none; border:none; color: var(--color-sidebar-text); padding:7px 9px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }
     .topbar-nav button.active { background: var(--color-sidebar-bg-2); color: var(--color-sidebar-text-active); }
     .main-inner { padding: 20px 16px 70px; }
@@ -1181,39 +1197,74 @@
 
   // ---------- mobile Today (field-work landing) ----------
   // Reuses isCurrentlyScheduled()/localDateKey() exactly as Technician View
-  // does — no second definition of "scheduled" here.
+  // does — no second definition of "scheduled" here. Phase 2B: turns this
+  // into a daily work center (richer cards, prominent appointment time,
+  // Call/Text/Directions/Open actions, a compact Upcoming list, and a
+  // + New opportunity quick action that opens the SAME openDealModal(null)
+  // flow used everywhere else in the CRM). Filtering rules, Contact
+  // resolution via contactId, and the render/state cycle are unchanged.
+  var TM_ICONS = {
+    call: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.58 2.81.7A2 2 0 0 1 22 16.92z"/>',
+    text: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>',
+    pin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
+    open: '<path d="M9 18l6-6-6-6"/>'
+  };
+  function tmIcon(name){ return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+TM_ICONS[name]+'</svg>'; }
+  // Display-only 12-hour formatting for the appointment time shown on this
+  // screen. The stored scheduledTime value (HH:MM) is never altered —
+  // Schedule and Technician View keep displaying it exactly as before.
+  function tmFormatTime(t){
+    if (!t) return '';
+    var parts = t.split(':');
+    var h = parseInt(parts[0], 10);
+    if (isNaN(h)) return t;
+    var m = parts[1] || '00';
+    var ampm = h >= 12 ? 'PM' : 'AM';
+    var h12 = h % 12; if (h12 === 0) h12 = 12;
+    return h12 + ':' + m + ' ' + ampm;
+  }
   function renderMobileToday(){
     var wrap = document.getElementById('today-mobile');
     var deals = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){ return !d.archived; });
     var todayKey = localDateKey();
     var todays = deals.filter(function(d){ return isCurrentlyScheduled(d) && d.scheduledDate === todayKey; })
       .sort(function(a,b){ return (a.scheduledTime||'').localeCompare(b.scheduledTime||''); });
-    var upcoming = deals.filter(function(d){ return isCurrentlyScheduled(d) && d.scheduledDate && d.scheduledDate > todayKey; })
-      .sort(function(a,b){ return (a.scheduledDate+  (a.scheduledTime||'')).localeCompare(b.scheduledDate+(b.scheduledTime||'')); })
-      .slice(0, 10);
+    var upcomingAll = deals.filter(function(d){ return isCurrentlyScheduled(d) && d.scheduledDate && d.scheduledDate > todayKey; })
+      .sort(function(a,b){ return (a.scheduledDate+(a.scheduledTime||'')).localeCompare(b.scheduledDate+(b.scheduledTime||'')); });
+    var UPCOMING_SHOWN = 8;
+    var upcoming = upcomingAll.slice(0, UPCOMING_SHOWN);
+
+    function field(label, value){
+      if (!value) return '';
+      return '<div class="tm-field"><div class="tm-field-label">'+esc(label)+'</div><div class="tm-field-value">'+value+'</div></div>';
+    }
 
     function jobCard(d){
       var contact = state.contacts[d.contactId];
+      var customerName = contact ? contact.name : d.contactName;
       var phone = contact && contact.phone != null ? String(contact.phone) : '';
       var phoneDigits = phone.replace(/[^0-9+]/g,'');
       var address = contact ? contact.address : '';
       var jt = JOB_TYPES.filter(function(j){ return j.id===d.jobType; })[0];
       var st = stageInfo(d.stage);
-      var metaBits = [];
-      if (contact ? contact.name : d.contactName) metaBits.push(esc(contact?contact.name:d.contactName));
-      if (d.vehicle) metaBits.push(esc(d.vehicle));
+      var timeLabel = d.scheduledTime ? esc(tmFormatTime(d.scheduledTime)) : 'Time not set';
       var card = el(
         '<div class="tm-card">' +
-          '<div class="tm-title">'+esc(d.title||'Untitled job')+' <span class="role-badge" style="background:'+st.bgDot+';color:#fff;">'+esc(st.label)+'</span></div>' +
-          '<div class="tm-meta">'+metaBits.join(' &middot; ')+(d.scheduledTime?' &middot; '+esc(d.scheduledTime):'')+(d.scheduledDate!==todayKey?' &middot; '+esc(d.scheduledDate):'')+'</div>' +
-          (jt ? '<div class="tm-meta">'+esc(jt.label)+'</div>' : '') +
-          (d.assignedTo ? '<div class="tm-meta">Assigned: '+esc(d.assignedTo)+'</div>' : '') +
-          (address ? '<div class="tm-meta">'+esc(address)+'</div>' : '') +
+          '<div class="tm-top-row">' +
+            '<div class="tm-appt-time'+(d.scheduledTime?'':' unset')+'">'+timeLabel+'</div>' +
+            '<span class="role-badge" style="background:'+st.bgDot+';color:#fff;">'+esc(st.label)+'</span>' +
+          '</div>' +
+          (d.title ? '<div class="tm-title">'+esc(d.title)+'</div>' : '') +
+          field('Customer', customerName ? esc(customerName) : '') +
+          field('Service', jt ? esc(jt.label) : '') +
+          field('Vehicle', d.vehicle ? esc(d.vehicle) : '') +
+          field('Technician', d.assignedTo ? esc(d.assignedTo) : '') +
+          field('Address', address ? esc(address) : '') +
           '<div class="tm-actions">' +
-            (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="tel:'+esc(phoneDigits)+'">Call</a>' : '') +
-            (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="sms:'+esc(phoneDigits)+'">Text</a>' : '') +
-            (address ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(address)+'" target="_blank" rel="noopener">Directions</a>' : '') +
-            '<button class="btn btn-primary btn-sm" data-open="'+esc(d.id)+'">Open job</button>' +
+            (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="tel:'+esc(phoneDigits)+'">'+tmIcon('call')+'Call</a>' : '') +
+            (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="sms:'+esc(phoneDigits)+'">'+tmIcon('text')+'Text</a>' : '') +
+            (address ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(address)+'" target="_blank" rel="noopener">'+tmIcon('pin')+'Directions</a>' : '') +
+            '<button type="button" class="btn btn-primary btn-sm" data-open="'+esc(d.id)+'">'+tmIcon('open')+'Open job</button>' +
           '</div>' +
         '</div>'
       );
@@ -1221,16 +1272,60 @@
       return card;
     }
 
-    var html = '<div class="section-label">Today</div>';
-    wrap.innerHTML = html;
+    function upcomingRow(d){
+      var contact = state.contacts[d.contactId];
+      var customerName = contact ? contact.name : d.contactName;
+      var jt = JOB_TYPES.filter(function(j){ return j.id===d.jobType; })[0];
+      var dateLabel = new Date(d.scheduledDate+'T00:00:00').toLocaleDateString('en-US',{month:'short', day:'numeric'});
+      var metaBits = [];
+      if (customerName) metaBits.push(esc(customerName));
+      if (jt) metaBits.push(esc(jt.label));
+      if (d.vehicle) metaBits.push(esc(d.vehicle));
+      var row = el(
+        '<button type="button" class="panel-row" style="width:100%;text-align:left;background:none;border:none;font:inherit;cursor:pointer;">' +
+          '<div class="tm-upcoming-time">'+esc(dateLabel)+(d.scheduledTime?'<br>'+esc(tmFormatTime(d.scheduledTime)):'')+'</div>' +
+          '<div class="p-main"><div class="p-name">'+(metaBits.join(' &middot; ')||'Untitled job')+'</div></div>' +
+        '</button>'
+      );
+      row.addEventListener('click', function(){ openDealModal(d.id); });
+      return row;
+    }
+
+    var todayDateLabel = new Date().toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' });
+    var summaryBits = [];
+    summaryBits.push(todays.length + (todays.length===1 ? ' job today' : ' jobs today'));
+    if (upcomingAll.length) summaryBits.push(upcomingAll.length + (upcomingAll.length===1 ? ' upcoming' : ' upcoming'));
+
+    wrap.innerHTML = '';
+    var header = el(
+      '<div class="tm-header">' +
+        '<div><div class="section-label">Today</div><div class="tm-date">'+esc(todayDateLabel)+'</div></div>' +
+        '<button type="button" class="btn btn-primary btn-sm" id="tm-new-opp">+ New opportunity</button>' +
+      '</div>'
+    );
+    header.querySelector('#tm-new-opp').addEventListener('click', function(){ openDealModal(null); });
+    wrap.appendChild(header);
+    wrap.appendChild(el('<div class="tm-summary">'+esc(summaryBits.join(' · '))+'</div>'));
+
+    if (todays.length === 0 && upcomingAll.length === 0){
+      wrap.appendChild(el('<div class="empty-note">No jobs currently scheduled.</div>'));
+      return;
+    }
+
     if (todays.length === 0){
       wrap.appendChild(el('<div class="empty-note">No jobs scheduled for today.</div>'));
     } else {
       todays.forEach(function(d){ wrap.appendChild(jobCard(d)); });
     }
-    if (upcoming.length){
-      wrap.appendChild(el('<div class="section-label" style="margin-top:16px;">Upcoming</div>'));
-      upcoming.forEach(function(d){ wrap.appendChild(jobCard(d)); });
+
+    if (upcomingAll.length){
+      wrap.appendChild(el('<div class="section-label" style="margin-top:18px;">Upcoming</div>'));
+      var list = el('<div class="panel-list"></div>');
+      upcoming.forEach(function(d){ list.appendChild(upcomingRow(d)); });
+      wrap.appendChild(list);
+      var viewBtn = el('<button type="button" class="tm-view-schedule">View full schedule'+(upcomingAll.length > UPCOMING_SHOWN ? ' ('+(upcomingAll.length-UPCOMING_SHOWN)+' more)' : '')+'</button>');
+      viewBtn.addEventListener('click', function(){ setView('schedule'); });
+      wrap.appendChild(viewBtn);
     }
   }
 
