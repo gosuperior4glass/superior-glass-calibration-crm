@@ -300,6 +300,8 @@
   .banner { background: var(--color-surface-2); border:1px solid var(--color-border); border-radius:9px; padding:11px 15px; font-size:12.5px; color: var(--color-text-muted); margin-bottom:20px; }
   .loading-screen { display:flex; align-items:center; justify-content:center; height:100vh; width:100%; color: var(--color-text-muted); font-size:13.5px; }
   .loading-screen[hidden] { display:none; }
+  .bottom-nav { display:none; }
+  #today-mobile { display:none; }
 
   @media (max-width: 860px) {
     .app { flex-direction: column; }
@@ -312,7 +314,7 @@
     #today-stats, #today-mobile-desktop-wrap { display:none; }
     #today-mobile { display:block; }
   }
-  .bottom-nav { display:none; position:fixed; left:0; right:0; bottom:0; z-index:400;
+  .bottom-nav { position:fixed; left:0; right:0; bottom:0; z-index:400;
     background: var(--color-sidebar-bg); border-top:1px solid var(--color-sidebar-bg-2);
     padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px)); justify-content:space-around; align-items:stretch; }
   .bnav-item { display:flex; flex-direction:column; align-items:center; gap:2px; background:none; border:none;
@@ -330,7 +332,6 @@
     padding:13px 12px; border-radius:9px; font-size:14.5px; color: var(--color-text); cursor:pointer; }
   .more-item:focus-visible, .bnav-item:focus-visible { outline:2px solid var(--color-accent); outline-offset:2px; }
   .more-item svg { width:19px; height:19px; flex-shrink:0; opacity:.8; }
-  #today-mobile { display:none; }
   .tm-card { background: var(--color-surface); border:1px solid var(--color-border); border-radius:10px; padding:14px; margin-bottom:10px; box-shadow: var(--shadow-card); }
   .tm-title { font-weight:700; font-size:14.5px; margin-bottom:2px; }
   .tm-meta { font-size:12.5px; color: var(--color-text-muted); margin-bottom:2px; }
