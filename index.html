@@ -3794,8 +3794,17 @@
           '<div class="form-grid">' +
             '<div class="form-field full"><label for="dm-contact-name">Contact name</label><input list="contact-names" id="dm-contact-name" required></div>' +
             '<datalist id="contact-names">'+contactNames.map(function(n){ return '<option value="'+esc(n)+'">'; }).join('')+'</datalist>' +
-            '<div class="form-field"><label for="dm-phone">Phone (if new contact)</label><input id="dm-phone" type="tel"></div>' +
-            '<div class="form-field"><label for="dm-email">Email (if new contact)</label><input id="dm-email" type="email"></div>' +
+            '<div class="form-field full" id="dm-contact-match-note" hidden style="margin:-6px 0 0;font-size:12px;color:var(--color-text-muted);"></div>' +
+            '<div class="form-field"><label for="dm-phone">Phone</label><input id="dm-phone" type="tel"></div>' +
+            '<div class="form-field"><label for="dm-email">Email</label><input id="dm-email" type="email"></div>' +
+            // Only revealed/populated when the typed name exactly matches an
+            // existing Contact (see the dm-contact-name input listener
+            // below). Hidden and unused for the brand-new-contact path,
+            // which keeps working exactly as before with just name/phone/
+            // email defaulting company/address/accountType blank/individual.
+            '<div class="form-field" id="dm-existing-contact-fields" hidden><label for="dm-company">Company</label><input id="dm-company"></div>' +
+            '<div class="form-field full" id="dm-address-field" hidden><label for="dm-address">Address</label><input id="dm-address"></div>' +
+            '<div class="form-field" id="dm-accounttype-field" hidden><label for="dm-accounttype">Account type</label><select id="dm-accounttype"><option value="individual">Individual</option><option value="fleet">Fleet / commercial account</option></select></div>' +
           '</div>'
         ) +
         '<div class="form-grid">' +
@@ -3878,7 +3887,48 @@
           attachFileInput.value = ''; // allow re-selecting the same file later
         });
       }
+    } else {
+      // New opportunity, existing-Contact match: as the user types a name
+      // that exactly matches (case-insensitive) an already-saved Contact —
+      // the same findContactByName() the submit handler already uses —
+      // show and pre-fill Phone/Email/Company/Address/Account type from
+      // that Contact so the field isn't confusingly blank. This is
+      // populate-only; nothing is written anywhere until Save. If the
+      // typed name stops matching, the extra fields hide again and Phone/
+      // Email revert to being plain new-contact fields exactly as before.
+      var nameInput = document.getElementById('dm-contact-name');
+      var matchNote = document.getElementById('dm-contact-match-note');
+      var extraFields = document.getElementById('dm-existing-contact-fields');
+      var addressField = document.getElementById('dm-address-field');
+      var accountTypeField = document.getElementById('dm-accounttype-field');
+      nameInput.addEventListener('input', function(){
+        var match = findContactByName(nameInput.value);
+        if (match){
+          document.getElementById('dm-phone').value = match.phone || '';
+          document.getElementById('dm-email').value = match.email || '';
+          document.getElementById('dm-company').value = match.company || '';
+          document.getElementById('dm-address').value = match.address || '';
+          document.getElementById('dm-accounttype').value = match.accountType === 'fleet' ? 'fleet' : 'individual';
+          matchNote.hidden = false;
+          matchNote.textContent = 'Matches an existing contact — their saved information is shown below. Editing it here will update their contact record.';
+          extraFields.hidden = false;
+          addressField.hidden = false;
+          accountTypeField.hidden = false;
+        } else {
+          matchNote.hidden = true;
+          extraFields.hidden = true;
+          addressField.hidden = true;
+          accountTypeField.hidden = true;
+        }
+      });
     }
+    // Existing-Contact fields from a Contact save in THIS modal that ended
+    // 'failed'. saveContact() applies its patch to state.contacts
+    // optimistically, and if every verification read also failed that
+    // unconfirmed value stays in local state — so a retry's diff alone
+    // would see "no change" and let the Opportunity proceed. These fields
+    // are re-sent on the next submit until the Contact save is confirmed.
+    var unconfirmedContactFields = null; // { contactId, fields: { name:true, ... } }
     document.getElementById('deal-form').addEventListener('submit', async function(e){
       e.preventDefault();
       var submitBtn = e.target.querySelector('button[type="submit"]');
@@ -3957,6 +4007,9 @@
         var contactName = document.getElementById('dm-contact-name').value.trim();
         var phone = document.getElementById('dm-phone').value.trim();
         var email = document.getElementById('dm-email').value.trim();
+        var companyField = document.getElementById('dm-company');
+        var addressField2 = document.getElementById('dm-address');
+        var accountTypeField2 = document.getElementById('dm-accounttype');
         if (!contactName) return;
         var existing = findContactByName(contactName);
         var proceedWithContactId = async function(contactId){
@@ -3975,8 +4028,55 @@
             setModalStatus('failed', 'Not synced \u2014 check your connection and click Add opportunity again. Nothing you\u2019ve entered has been lost.');
           }
         };
-        if (existing){ proceedWithContactId(existing.id); }
-        else {
+        if (existing){
+          // Existing Contact selected: sync any FIELD THAT ACTUALLY CHANGED
+          // back to that same Contact record (by its existing id \u2014 never a
+          // new one). Compared against the Contact's own last-known values,
+          // not against blank, so a field the modal never touched (or that
+          // still matches what's already saved) is never resent \u2014 this is
+          // what keeps an unrelated/no-op save from rewriting the Contact,
+          // and keeps a population bug from ever being able to blank out
+          // real data: the only way a field reaches saveContact() here is
+          // if its value in the form differs from what's on file.
+          var newVals = {
+            name: contactName,
+            phone: phone,
+            email: email,
+            company: companyField ? companyField.value.trim() : '',
+            address: addressField2 ? addressField2.value.trim() : '',
+            accountType: accountTypeField2 ? accountTypeField2.value : 'individual'
+          };
+          var contactPatch = {};
+          Object.keys(newVals).forEach(function(field){
+            if (newVals[field] !== (existing[field] || '')) contactPatch[field] = newVals[field];
+          });
+          if (unconfirmedContactFields && unconfirmedContactFields.contactId === existing.id){
+            Object.keys(unconfirmedContactFields.fields).forEach(function(field){ contactPatch[field] = newVals[field]; });
+          }
+          if (!Object.keys(contactPatch).length){
+            proceedWithContactId(existing.id);
+            return;
+          }
+          // Contact changes must be confirmed BEFORE the Opportunity is saved,
+          // using the same result contract as every other modal save:
+          // 'saved' proceeds; 'conflict'/'failed' keep the modal open.
+          if (submitBtn) submitBtn.disabled = true;
+          setModalStatus(null, null);
+          var contactResult = await saveContact(existing.id, contactPatch, { silent: true });
+          if (submitBtn) submitBtn.disabled = false;
+          if (contactResult.status === 'saved'){
+            unconfirmedContactFields = null;
+            proceedWithContactId(existing.id);
+          } else if (contactResult.status === 'conflict'){
+            unconfirmedContactFields = null; // conflict path re-reads the server version, so the next diff is accurate
+            setModalStatus('conflict', 'Someone else updated this contact while you were working, so your contact changes weren’t applied and the opportunity hasn’t been saved yet. Nothing you’ve entered below has been lost — click Add opportunity again to apply it on top of their update, or Cancel to review the latest version first.');
+          } else {
+            var failedFields = (unconfirmedContactFields && unconfirmedContactFields.contactId === existing.id) ? unconfirmedContactFields.fields : {};
+            Object.keys(contactPatch).forEach(function(field){ failedFields[field] = true; });
+            unconfirmedContactFields = { contactId: existing.id, fields: failedFields };
+            setModalStatus('failed', 'Contact details didn’t sync — check your connection and click Add opportunity again. The opportunity hasn’t been saved yet, and nothing you’ve entered has been lost.');
+          }
+        } else {
           var newContact = { name: contactName, phone: phone, email: email, company:'', accountType:'individual', address:'', whereMet:'', affiliations:'', notes:'', createdAt: nowIso() };
           var newId = uid();
           saveContact(newId, newContact);
