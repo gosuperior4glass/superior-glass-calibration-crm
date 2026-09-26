@@ -303,6 +303,8 @@
   .bottom-nav { display:none; }
   #today-mobile { display:none; }
   #pipeline-mobile { display:none; }
+  #pipeline-options-toggle { display:none; }
+  #contacts-mobile { display:none; }
 
   @media (max-width: 860px) {
     .app { flex-direction: column; }
@@ -316,7 +318,28 @@
     #today-mobile { display:block; }
     .kanban { display:none; }
     #pipeline-mobile { display:block; }
+    #pipeline-options-toggle { display:inline-flex; }
+    /* Collapsed by default on mobile only; desktop keeps its own
+       unconditional .search-row{display:flex} rule untouched, so above
+       860px this id-scoped override never applies. */
+    #pipeline-toolbar { display:none; }
+    /* Contacts: desktop's Export/New-contact pair and the plain row list
+       are replaced on mobile by #contacts-mobile's own header (with its
+       own + New contact trigger calling the same openContactModal(null))
+       and card list. The search input + Individual/Fleet filter directly
+       above stay visible and reused as-is — same #contact-search element,
+       same #account-filter buttons, same state/handlers, just restyled
+       full-width by the #contacts-search-row rule below. */
+    #contacts-head-actions { display:none; }
+    #contacts-search-row #contact-search { width:100%; }
+    #contact-list { display:none; }
+    #contacts-mobile { display:block; }
   }
+  /* Higher specificity (id+class) than the plain #pipeline-toolbar rule
+     above, so this always wins once the class is toggled on, regardless
+     of source order — deliberately not relying on cascade order here
+     after the earlier #today-mobile/.bottom-nav order bug. */
+  #pipeline-toolbar.pipeline-toolbar-open { display:flex; }
   .bottom-nav { position:fixed; left:0; right:0; bottom:0; z-index:400;
     background: var(--color-sidebar-bg); border-top:1px solid var(--color-sidebar-bg-2);
     padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px)); justify-content:space-around; align-items:stretch; }
@@ -356,7 +379,7 @@
   .tm-upcoming-time { font-weight:700; flex-shrink:0; }
   .tm-view-schedule { display:block; text-align:center; padding:11px; font-size:12.5px; font-weight:600; color: var(--color-accent-2); cursor:pointer; background:none; border:none; width:100%; }
 
-  .pm-stage-scroll { display:flex; gap:8px; overflow-x:auto; -webkit-overflow-scrolling:touch; padding: 2px 2px 12px; margin-bottom:4px; }
+  .pm-stage-scroll { display:flex; gap:8px; overflow-x:auto; -webkit-overflow-scrolling:touch; padding: 2px 2px 12px; margin-bottom:4px; margin-top:10px; }
   .pm-chip { flex-shrink:0; display:inline-flex; align-items:center; gap:6px; background: var(--color-surface); border:1px solid var(--color-border); border-radius:20px; padding:8px 14px; font-size:12.5px; font-weight:600; color: var(--color-text); cursor:pointer; white-space:nowrap; }
   .pm-chip .count-badge { background: var(--color-surface-2); border-radius:10px; padding:1px 7px; font-size:11px; color: var(--color-text-muted); font-weight:700; }
   .pm-chip.active { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-accent-ink); }
@@ -369,6 +392,17 @@
   .pm-card-meta { font-size:12.5px; color: var(--color-text-muted); margin-top:2px; word-break:break-word; }
   .pm-card-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; }
   .pm-card-amount { font-weight:700; font-size:13.5px; }
+
+  .cm-header { display:flex; justify-content:flex-end; margin-bottom:12px; }
+  .cm-card { background: var(--color-surface); border:1px solid var(--color-border); border-radius:10px; padding:14px; margin-bottom:10px; box-shadow: var(--shadow-card); width:100%; text-align:left; cursor:pointer; font:inherit; color:inherit; }
+  .cm-card:focus-visible { outline:2px solid var(--color-accent-2); outline-offset:2px; }
+  .cm-card-top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+  .cm-name { font-weight:700; font-size:14.5px; word-break:break-word; }
+  .cm-meta { font-size:12.5px; color: var(--color-text-muted); margin-top:2px; word-break:break-word; }
+  .cm-tags { display:flex; gap:6px; flex-shrink:0; }
+  .cm-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .cm-actions .btn { min-height:38px; }
+  .cm-actions svg { width:15px; height:15px; flex-shrink:0; }
     .topbar-nav button { background:none; border:none; color: var(--color-sidebar-text); padding:7px 9px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }
     .topbar-nav button.active { background: var(--color-sidebar-bg-2); color: var(--color-sidebar-text-active); }
     .main-inner { padding: 20px 16px 70px; }
@@ -516,9 +550,10 @@
           <div class="head-actions">
             <select class="search-input" id="source-filter-pipeline" style="max-width:220px;"></select>
             <button class="btn btn-primary" id="add-deal-btn">+ New opportunity</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="pipeline-options-toggle">&#8942; Pipeline options</button>
           </div>
         </div>
-        <div class="search-row" style="margin-top:-6px;">
+        <div class="search-row" id="pipeline-toolbar" style="margin-top:-6px;">
           <button class="btn btn-ghost btn-sm" id="archive-old-btn">Archive jobs finished 30+ days ago</button>
           <button class="btn btn-ghost btn-sm" id="merge-dupe-deals-btn">Merge duplicate opportunities</button>
           <label style="display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--color-text-muted); cursor:pointer;">
@@ -681,9 +716,9 @@
             <h1 class="page-title">Contacts</h1>
             <div class="page-sub">Everyone you've quoted, met, or worked with.</div>
           </div>
-          <div class="head-actions"><button class="btn btn-ghost" id="export-contacts-btn">Export contacts (CSV)</button><button class="btn btn-primary" id="add-contact-btn">+ New contact</button></div>
+          <div class="head-actions" id="contacts-head-actions"><button class="btn btn-ghost" id="export-contacts-btn">Export contacts (CSV)</button><button class="btn btn-primary" id="add-contact-btn">+ New contact</button></div>
         </div>
-        <div class="search-row">
+        <div class="search-row" id="contacts-search-row">
           <input class="search-input" id="contact-search" type="text" placeholder="Search by name, company, phone, or email">
           <div class="seg-control" id="account-filter">
             <button data-filter="all" class="active">All</button>
@@ -692,6 +727,7 @@
           </div>
         </div>
         <div class="contact-list" id="contact-list"></div>
+        <div id="contacts-mobile"></div>
       </section>
 
       <section class="view" data-view="goals" hidden>
@@ -1226,7 +1262,8 @@
     call: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.58 2.81.7A2 2 0 0 1 22 16.92z"/>',
     text: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>',
     pin: '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
-    open: '<path d="M9 18l6-6-6-6"/>'
+    open: '<path d="M9 18l6-6-6-6"/>',
+    mail: '<path d="M4 4h16v16H4z"/><path d="M4 6l8 7 8-7"/>'
   };
   function tmIcon(name){ return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+TM_ICONS[name]+'</svg>'; }
   // Display-only 12-hour formatting for the appointment time shown on this
@@ -1743,7 +1780,7 @@
     if (state.view === 'schedule') renderSchedule();
     if (state.view === 'operations') renderOperations();
     if (state.view === 'field') renderFieldView();
-    if (state.view === 'contacts') renderContacts();
+    if (state.view === 'contacts'){ renderContacts(); renderMobileContacts(); }
     if (state.view === 'goals') renderGoals();
     if (state.view === 'users') renderUsers();
     renderDbBanner();
@@ -2302,6 +2339,12 @@
     });
   }
   document.getElementById('add-deal-btn').addEventListener('click', function(){ openDealModal(null); });
+  // Mobile-only: collapses/reveals the existing archive/merge/show-archived
+  // toolbar (#pipeline-toolbar). Purely a visibility toggle — none of the
+  // three controls' own click/change handlers below are touched.
+  document.getElementById('pipeline-options-toggle').addEventListener('click', function(){
+    document.getElementById('pipeline-toolbar').classList.toggle('pipeline-toolbar-open');
+  });
   document.getElementById('show-archived-toggle').addEventListener('change', function(e){ state.showArchived = e.target.checked; renderPipeline(); renderMobilePipeline(); });
   document.getElementById('archive-old-btn').addEventListener('click', function(){
     var cutoff = Date.now() - 30*86400000;
@@ -3292,7 +3335,71 @@
       list.appendChild(row);
     });
   }
-  document.getElementById('contact-search').addEventListener('input', function(e){ state.contactSearch = e.target.value; renderContacts(); });
+  // ---------- mobile Contacts (Phase 2C) ----------
+  // Consumes the SAME state.contacts data and the SAME
+  // state.contactSearch/state.accountFilter filters as renderContacts()
+  // above (identical filter/sort logic, intentionally duplicated the same
+  // way renderMobileToday()/renderMobilePipeline() already do, rather than
+  // sharing a helper) and opens contacts through the SAME openContactModal()
+  // used by desktop and by "+ New contact". No second search algorithm, no
+  // second contact editor, no change to how contacts are stored.
+  function renderMobileContacts(){
+    var wrap = document.getElementById('contacts-mobile');
+    if (!wrap) return;
+    var term = state.contactSearch.trim().toLowerCase();
+    var contacts = Object.keys(state.contacts).map(function(k){ return state.contacts[k]; });
+    contacts = contacts.filter(function(c){
+      if (state.accountFilter !== 'all' && (c.accountType||'individual') !== state.accountFilter) return false;
+      if (!term) return true;
+      return [c.name, c.company, c.phone, c.email].some(function(f){ return f != null && String(f).toLowerCase().indexOf(term) !== -1; });
+    }).sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+
+    wrap.innerHTML = '';
+    var header = el('<div class="cm-header"><button type="button" class="btn btn-primary btn-sm" id="cm-mobile-new">+ New contact</button></div>');
+    header.querySelector('#cm-mobile-new').addEventListener('click', function(){ openContactModal(null); });
+    wrap.appendChild(header);
+
+    if (contacts.length === 0){
+      wrap.appendChild(el('<div class="empty-note">'+(term ? 'No contacts match that search.' : 'No contacts yet &mdash; add your first one.')+'</div>'));
+      return;
+    }
+    contacts.forEach(function(c){
+      var dealCount = Object.keys(state.deals).filter(function(k){ return state.deals[k].contactId === c.id; }).length;
+      var isFleet = c.accountType === 'fleet';
+      var phone = c.phone != null ? String(c.phone) : '';
+      var phoneDigits = phone.replace(/[^0-9+]/g,'');
+      var metaBits = [c.company, c.phone, c.email].filter(Boolean).map(esc);
+      // A plain div (not a <button>) — same choice the existing desktop
+      // .contact-row already makes — because it contains real <a> tags
+      // (Call/Text/Email), and interactive elements can't be nested inside
+      // a <button>. role="button" + tabindex + a keydown handler restore
+      // the keyboard activation a native button would give for free.
+      var card = el(
+        '<div class="cm-card" role="button" tabindex="0">' +
+          '<div class="cm-card-top">' +
+            '<div><div class="cm-name">'+esc(c.name)+'</div>'+(metaBits.length ? '<div class="cm-meta">'+metaBits.join(' &middot; ')+'</div>' : '')+'</div>' +
+            '<div class="cm-tags">'+(isFleet ? '<span class="contact-tag fleet">Fleet</span>' : '')+(dealCount ? '<span class="contact-tag">'+dealCount+' job'+(dealCount===1?'':'s')+'</span>' : '')+'</div>' +
+          '</div>' +
+          (phoneDigits || c.email ? '<div class="cm-actions">' +
+            (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="tel:'+esc(phoneDigits)+'">'+tmIcon('call')+'Call</a>' : '') +
+            (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="sms:'+esc(phoneDigits)+'">'+tmIcon('text')+'Text</a>' : '') +
+            (c.email ? '<a class="btn btn-ghost btn-sm" href="mailto:'+esc(c.email)+'">'+tmIcon('mail')+'Email</a>' : '') +
+          '</div>' : '') +
+        '</div>'
+      );
+      card.addEventListener('click', function(){ openContactModal(c.id); });
+      card.addEventListener('keydown', function(e){
+        if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); openContactModal(c.id); }
+      });
+      // Call/Text/Email must open the phone/SMS/mail app, not the contact
+      // modal — stop the click from bubbling to the card's own handler.
+      card.querySelectorAll('.cm-actions a').forEach(function(a){
+        a.addEventListener('click', function(e){ e.stopPropagation(); });
+      });
+      wrap.appendChild(card);
+    });
+  }
+  document.getElementById('contact-search').addEventListener('input', function(e){ state.contactSearch = e.target.value; renderContacts(); renderMobileContacts(); });
   document.getElementById('add-contact-btn').addEventListener('click', function(){ openContactModal(null); });
   document.getElementById('export-contacts-btn').addEventListener('click', function(){ exportContactsCsv(); });
   function exportContactsCsv(){
@@ -3319,6 +3426,7 @@
       state.accountFilter = btn.getAttribute('data-filter');
       document.querySelectorAll('#account-filter button').forEach(function(b){ b.classList.toggle('active', b===btn); });
       renderContacts();
+      renderMobileContacts();
     });
   });
 
