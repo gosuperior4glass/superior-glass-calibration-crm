@@ -15,7 +15,7 @@
 //
 // Bump CACHE_NAME (e.g. 'sgc-shell-v2') whenever the shell asset list below
 // changes, to force old caches to be cleared on the next visit.
-var CACHE_NAME = 'sgc-shell-v2';
+var CACHE_NAME = 'sgc-shell-v3';
 
 // Only the files that make up the installable app shell — never index.html
 // itself (see the fetch handler: index.html is always network-first, so a
