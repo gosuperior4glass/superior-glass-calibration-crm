@@ -306,7 +306,35 @@
     .sidebar { display:none; }
     .topbar { display:flex; align-items:center; justify-content:space-between; gap:10px; position:sticky; top:0; z-index:50; background: var(--color-sidebar-bg); padding: 12px 16px; padding-top: max(12px, env(safe-area-inset-top)); overflow-x:auto; }
     .topbar .brand { padding:0; flex-shrink:0; }
-    .topbar-nav { display:flex; gap:4px; flex-shrink:0; }
+    .topbar-nav { display:none; }
+    .bottom-nav { display:flex; }
+    .main-inner { padding-bottom: calc(78px + env(safe-area-inset-bottom, 0px)); }
+    #today-stats, #today-mobile-desktop-wrap { display:none; }
+    #today-mobile { display:block; }
+  }
+  .bottom-nav { display:none; position:fixed; left:0; right:0; bottom:0; z-index:400;
+    background: var(--color-sidebar-bg); border-top:1px solid var(--color-sidebar-bg-2);
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px)); justify-content:space-around; align-items:stretch; }
+  .bnav-item { display:flex; flex-direction:column; align-items:center; gap:2px; background:none; border:none;
+    color: var(--color-sidebar-text); font-size:10.5px; font-weight:600; padding:6px 4px; border-radius:8px; min-width:56px; cursor:pointer; }
+  .bnav-item svg { width:21px; height:21px; }
+  .bnav-item.active { color: var(--color-sidebar-text-active); }
+  .more-sheet-backdrop { display:none; position:fixed; inset:0; background:rgba(7,26,66,0.5); z-index:410; }
+  .more-sheet-backdrop.show { display:block; }
+  .more-sheet { position:fixed; left:0; right:0; bottom:0; z-index:420; background: var(--color-surface);
+    border-radius:16px 16px 0 0; padding:10px 10px calc(14px + env(safe-area-inset-bottom, 0px)); max-height:70vh; overflow-y:auto;
+    transform: translateY(100%); transition: transform .18s ease-out; }
+  .more-sheet.show { transform: translateY(0); }
+  .more-sheet-title { font-weight:700; font-size:13px; padding:8px 10px; color: var(--color-text-muted); }
+  .more-item { display:flex; align-items:center; gap:11px; width:100%; text-align:left; background:none; border:none;
+    padding:13px 12px; border-radius:9px; font-size:14.5px; color: var(--color-text); cursor:pointer; }
+  .more-item:focus-visible, .bnav-item:focus-visible { outline:2px solid var(--color-accent); outline-offset:2px; }
+  .more-item svg { width:19px; height:19px; flex-shrink:0; opacity:.8; }
+  #today-mobile { display:none; }
+  .tm-card { background: var(--color-surface); border:1px solid var(--color-border); border-radius:10px; padding:14px; margin-bottom:10px; box-shadow: var(--shadow-card); }
+  .tm-title { font-weight:700; font-size:14.5px; margin-bottom:2px; }
+  .tm-meta { font-size:12.5px; color: var(--color-text-muted); margin-bottom:2px; }
+  .tm-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
     .topbar-nav button { background:none; border:none; color: var(--color-sidebar-text); padding:7px 9px; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; white-space:nowrap; }
     .topbar-nav button.active { background: var(--color-sidebar-bg-2); color: var(--color-sidebar-text-active); }
     .main-inner { padding: 20px 16px 70px; }
@@ -474,7 +502,7 @@
           </div>
         </div>
         <div class="stat-row" id="today-stats"></div>
-        <div class="two-col">
+        <div class="two-col" id="today-mobile-desktop-wrap">
           <div>
             <div class="section-label">Priority work</div>
             <div class="panel-list" id="today-priority"></div>
@@ -484,6 +512,7 @@
             <div class="panel-list" id="today-schedule"></div>
           </div>
         </div>
+        <div id="today-mobile"></div>
       </section>
 
       <section class="view" data-view="trends" hidden>
@@ -689,6 +718,13 @@
 
     </div>
   </main>
+
+  <nav class="bottom-nav" id="bottom-nav" aria-label="Primary"></nav>
+  <div class="more-sheet-backdrop" id="more-sheet-backdrop"></div>
+  <div class="more-sheet" id="more-sheet" role="dialog" aria-modal="true" aria-label="More">
+    <div class="more-sheet-title">More</div>
+    <div id="more-sheet-items"></div>
+  </div>
 </div>
 </div>
 
@@ -1103,6 +1139,100 @@
     render();
   }
 
+  // ---------- mobile bottom nav + More sheet ----------
+  var MOBILE_BOTTOM_IDS = ['today','pipeline','contacts','schedule'];
+  var MORE_ICON = '<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>';
+  function buildBottomNav(){
+    var wrap = document.getElementById('bottom-nav');
+    wrap.innerHTML = '';
+    var role = state.currentUser ? state.currentUser.role : 'Technician';
+    MOBILE_BOTTOM_IDS.forEach(function(id){
+      var item = NAV_ITEMS.filter(function(n){ return n.id===id; })[0];
+      if (!item) return;
+      var btn = el('<button class="bnav-item" data-nav="'+item.id+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+item.icon+'</svg><span>'+item.label+'</span></button>');
+      btn.addEventListener('click', function(){ closeMoreSheet(); setView(item.id); });
+      wrap.appendChild(btn);
+    });
+    var moreBtn = el('<button class="bnav-item" id="bnav-more"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+MORE_ICON+'</svg><span>More</span></button>');
+    moreBtn.addEventListener('click', openMoreSheet);
+    wrap.appendChild(moreBtn);
+    buildMoreSheetItems(role);
+  }
+  function buildMoreSheetItems(role){
+    var wrap = document.getElementById('more-sheet-items');
+    wrap.innerHTML = '';
+    NAV_ITEMS.filter(function(item){ return MOBILE_BOTTOM_IDS.indexOf(item.id)===-1 && navItemVisible(item.id, role); }).forEach(function(item){
+      var btn = el('<button class="more-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'+item.icon+'</svg><span>'+item.label+'</span></button>');
+      btn.addEventListener('click', function(){ closeMoreSheet(); setView(item.id); });
+      wrap.appendChild(btn);
+    });
+  }
+  function openMoreSheet(){
+    document.getElementById('more-sheet-backdrop').classList.add('show');
+    document.getElementById('more-sheet').classList.add('show');
+  }
+  function closeMoreSheet(){
+    document.getElementById('more-sheet-backdrop').classList.remove('show');
+    document.getElementById('more-sheet').classList.remove('show');
+  }
+  document.getElementById('more-sheet-backdrop').addEventListener('click', closeMoreSheet);
+  document.addEventListener('keydown', function(e){ if (e.key==='Escape') closeMoreSheet(); });
+
+  // ---------- mobile Today (field-work landing) ----------
+  // Reuses isCurrentlyScheduled()/localDateKey() exactly as Technician View
+  // does — no second definition of "scheduled" here.
+  function renderMobileToday(){
+    var wrap = document.getElementById('today-mobile');
+    var deals = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){ return !d.archived; });
+    var todayKey = localDateKey();
+    var todays = deals.filter(function(d){ return isCurrentlyScheduled(d) && d.scheduledDate === todayKey; })
+      .sort(function(a,b){ return (a.scheduledTime||'').localeCompare(b.scheduledTime||''); });
+    var upcoming = deals.filter(function(d){ return isCurrentlyScheduled(d) && d.scheduledDate && d.scheduledDate > todayKey; })
+      .sort(function(a,b){ return (a.scheduledDate+  (a.scheduledTime||'')).localeCompare(b.scheduledDate+(b.scheduledTime||'')); })
+      .slice(0, 10);
+
+    function jobCard(d){
+      var contact = state.contacts[d.contactId];
+      var phone = contact && contact.phone != null ? String(contact.phone) : '';
+      var phoneDigits = phone.replace(/[^0-9+]/g,'');
+      var address = contact ? contact.address : '';
+      var jt = JOB_TYPES.filter(function(j){ return j.id===d.jobType; })[0];
+      var st = stageInfo(d.stage);
+      var metaBits = [];
+      if (contact ? contact.name : d.contactName) metaBits.push(esc(contact?contact.name:d.contactName));
+      if (d.vehicle) metaBits.push(esc(d.vehicle));
+      var card = el(
+        '<div class="tm-card">' +
+          '<div class="tm-title">'+esc(d.title||'Untitled job')+' <span class="role-badge" style="background:'+st.bgDot+';color:#fff;">'+esc(st.label)+'</span></div>' +
+          '<div class="tm-meta">'+metaBits.join(' &middot; ')+(d.scheduledTime?' &middot; '+esc(d.scheduledTime):'')+(d.scheduledDate!==todayKey?' &middot; '+esc(d.scheduledDate):'')+'</div>' +
+          (jt ? '<div class="tm-meta">'+esc(jt.label)+'</div>' : '') +
+          (d.assignedTo ? '<div class="tm-meta">Assigned: '+esc(d.assignedTo)+'</div>' : '') +
+          (address ? '<div class="tm-meta">'+esc(address)+'</div>' : '') +
+          '<div class="tm-actions">' +
+            (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="tel:'+esc(phoneDigits)+'">Call</a>' : '') +
+            (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="sms:'+esc(phoneDigits)+'">Text</a>' : '') +
+            (address ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(address)+'" target="_blank" rel="noopener">Directions</a>' : '') +
+            '<button class="btn btn-primary btn-sm" data-open="'+esc(d.id)+'">Open job</button>' +
+          '</div>' +
+        '</div>'
+      );
+      card.querySelector('[data-open]').addEventListener('click', function(){ openDealModal(d.id); });
+      return card;
+    }
+
+    var html = '<div class="section-label">Today</div>';
+    wrap.innerHTML = html;
+    if (todays.length === 0){
+      wrap.appendChild(el('<div class="empty-note">No jobs scheduled for today.</div>'));
+    } else {
+      todays.forEach(function(d){ wrap.appendChild(jobCard(d)); });
+    }
+    if (upcoming.length){
+      wrap.appendChild(el('<div class="section-label" style="margin-top:16px;">Upcoming</div>'));
+      upcoming.forEach(function(d){ wrap.appendChild(jobCard(d)); });
+    }
+  }
+
   // ---------- persistence ----------
   // Every write updates local state immediately (so the UI never waits on
   // the network) and shows "Saving...". A follow-up authenticated read then
@@ -1415,7 +1545,7 @@
   function render(){
     if (state.view === 'dashboard') renderDashboard();
     if (state.view === 'pipeline') renderPipeline();
-    if (state.view === 'today') renderToday();
+    if (state.view === 'today'){ renderToday(); renderMobileToday(); }
     if (state.view === 'trends') renderTrends();
     if (state.view === 'reports') renderReports();
     if (state.view === 'schedule') renderSchedule();
@@ -3590,8 +3720,10 @@
     document.getElementById('app-shell').hidden = false;
     document.getElementById('current-user-label').textContent = state.currentUser.name + ' \u00b7 ' + state.currentUser.role;
     buildNav();
+    buildBottomNav();
     setupSourceFilters();
-    setView('pipeline');
+    var isMobileLanding = window.matchMedia && window.matchMedia('(max-width: 860px)').matches;
+    setView(isMobileLanding ? 'today' : 'pipeline');
 
     if (!scriptConfigured()){
       state.remoteConnected = false;
