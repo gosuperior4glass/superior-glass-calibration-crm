@@ -1002,7 +1002,12 @@
   function confirmedWrite(sheetName, id, data, expectedVersion, options){
     setSyncBadge('saving');
     var startedAt = Date.now();
-    apiPostRaw({ action:'saveRecord', sheet:sheetName, id:id, data:data, expectedVersion:expectedVersion });
+    var postBody = { action:'saveRecord', sheet:sheetName, id:id, data:data, expectedVersion:expectedVersion };
+    // Only a Contact save explicitly given a user-confirmed duplicate
+    // override carries it; it rides outside `data`, so it is never stored
+    // and never part of the field verification below.
+    if (sheetName === 'contacts' && options && options.contactDuplicateOverride) postBody.contactDuplicateOverride = options.contactDuplicateOverride;
+    apiPostRaw(postBody);
     return verifyWrite(sheetName, id, data, expectedVersion, startedAt, 0, options||{});
   }
   // Tolerant equality for comparing a submitted field value against what the
@@ -1493,10 +1498,57 @@
     persistLocal(); render();
     return confirmedWrite('contacts', finalId, data, expectedVersion, options);
   }
-  function deleteContact(id){
-    delete state.contacts[id];
-    persistLocal(); render();
-    confirmedDelete('contacts', id);
+  // Linked-record counts taken from an authoritative server snapshot, using
+  // the SAME rule as handleDeleteRecord()'s backend safeguard (any Deal or
+  // Followup whose contactId is this Contact). Needed because the browser
+  // cannot read the backend's 'contact_has_linked_records' reply (writes
+  // are no-cors), so the counts are re-derived from the data itself.
+  function countContactLinks(snap, id){
+    var deals = (snap.deals||[]).filter(function(d){ return String(d.contactId) === String(id); }).length;
+    var followups = (snap.followups||[]).filter(function(f){ return String(f.contactId) === String(id); }).length;
+    return { deals: deals, followups: followups };
+  }
+  function contactLinkedMessage(links){
+    var parts = [];
+    if (links.deals) parts.push(links.deals + (links.deals === 1 ? ' opportunity' : ' opportunities'));
+    if (links.followups) parts.push(links.followups + (links.followups === 1 ? ' follow-up' : ' follow-ups'));
+    return 'This contact cannot be deleted because it is linked to ' + parts.join(' and ') + '.';
+  }
+  // Contact delete is NOT optimistic: the Contact stays in local state until
+  // a fresh server read shows it is gone. Resolves to
+  // { status:'deleted' } | { status:'blocked', links } | { status:'failed' }.
+  // Never touches any Deal or Followup.
+  async function deleteContact(id){
+    setSyncBadge('saving');
+    var snap;
+    try { snap = await apiGetAll(); } catch(e){ snap = null; }
+    if (snap && !snap.ok && handleAuthError(snap.error)) return { status:'failed' };
+    if (snap && snap.ok){
+      applyRemoteSnapshot(snap);
+      if (!state.contacts[id]){ setSyncBadge('saved'); scheduleIdle(); return { status:'deleted' }; }
+      var pre = countContactLinks(snap, id);
+      // The backend would refuse this delete; don't send it.
+      if (pre.deals || pre.followups){ setSyncBadge('idle'); return { status:'blocked', links: pre }; }
+    }
+    apiPostRaw({ action:'deleteRecord', sheet:'contacts', id:id });
+    for (var attempt = 0; attempt < 5; attempt++){
+      await sleep(800);
+      try { snap = await apiGetAll(); } catch(e){ snap = null; }
+      if (!snap || !snap.ok){
+        if (snap && handleAuthError(snap.error)) return { status:'failed' };
+        setSyncBadge('retrying');
+        continue;
+      }
+      applyRemoteSnapshot(snap);
+      if (!state.contacts[id]){ setSyncBadge('saved'); scheduleIdle(); return { status:'deleted' }; }
+      // Still there: if a link exists now (e.g. added a moment ago by
+      // someone else), that is why the backend refused it.
+      var links = countContactLinks(snap, id);
+      if (links.deals || links.followups){ setSyncBadge('idle'); return { status:'blocked', links: links }; }
+      setSyncBadge('retrying');
+    }
+    setSyncBadge('failed');
+    return { status:'failed' };
   }
   function saveDeal(id, data, options){
     var finalId = id || uid();
@@ -1785,6 +1837,122 @@
       if (c.name && c.name.trim().toLowerCase() === lower) found = c;
     });
     return found;
+  }
+  // ---------- Contact duplicate prevention ----------
+  // Mirrors Code.gs normalizeContactPhone_/Email_/Name_ EXACTLY — the
+  // backend's locked handleSaveContact() check is the real enforcement;
+  // these only let the UI warn before a save instead of after a rejection.
+  function normalizeContactPhone(v){
+    var digits = String(v == null ? '' : v).replace(/\D/g, '');
+    if (digits.length === 11 && digits.charAt(0) === '1') digits = digits.slice(1);
+    return digits;
+  }
+  function normalizeContactEmail(v){ return String(v == null ? '' : v).trim().toLowerCase(); }
+  function normalizeContactName(v){ return String(v || '').toLowerCase().replace(/[.,'-]/g, '').replace(/\s+/g, ' ').trim(); }
+  // candidate: { name, phone, email } — pass '' for any field that should
+  // not be checked. excludeId: the Contact's own id (update, or a create
+  // being retried under its stable pending id) so it never matches itself.
+  // strong: other Contacts sharing a non-blank normalized phone or email.
+  // nameOnly: other Contacts with the same normalized name and no phone/
+  // email match (review only — never blocking on its own).
+  function findContactDuplicates(candidate, excludeId){
+    var p = normalizeContactPhone(candidate.phone), em = normalizeContactEmail(candidate.email), nm = normalizeContactName(candidate.name);
+    var strong = [], nameOnly = [];
+    Object.keys(state.contacts).forEach(function(id){
+      if (excludeId && String(id) === String(excludeId)) return;
+      var c = state.contacts[id];
+      if (!c) return;
+      var phoneHit = !!p && normalizeContactPhone(c.phone) === p;
+      var emailHit = !!em && normalizeContactEmail(c.email) === em;
+      if (phoneHit || emailHit) strong.push({ contact: c, phone: phoneHit, email: emailHit });
+      else if (nm && normalizeContactName(c.name) === nm) nameOnly.push(c);
+    });
+    return { strong: strong, nameOnly: nameOnly };
+  }
+  // For an UPDATE: only the phone/email whose normalized value is actually
+  // changing is checked (same rule as the backend), always excluding self.
+  function findUpdateDuplicates(contactId, newPhone, newEmail){
+    var cur = state.contacts[contactId] || {};
+    var p = (newPhone !== undefined && normalizeContactPhone(newPhone) !== normalizeContactPhone(cur.phone)) ? newPhone : '';
+    var em = (newEmail !== undefined && normalizeContactEmail(newEmail) !== normalizeContactEmail(cur.email)) ? newEmail : '';
+    return findContactDuplicates({ name:'', phone:p, email:em }, contactId).strong;
+  }
+  function dupContactCardHtml(c, matchLabel){
+    var dealCount = Object.keys(state.deals).filter(function(k){ return state.deals[k].contactId === c.id; }).length;
+    return '<div style="background:rgba(255,255,255,0.55);border-radius:6px;padding:8px 10px;margin:6px 0;">' +
+      '<div style="font-weight:700;font-size:13.5px;">'+esc(c.name||'(no name)')+(matchLabel ? ' <span style="font-weight:600;font-size:11.5px;">&middot; '+esc(matchLabel)+'</span>' : '')+'</div>' +
+      (c.phone ? '<div>Phone: '+esc(String(c.phone))+'</div>' : '') +
+      (c.email ? '<div>Email: '+esc(c.email)+'</div>' : '') +
+      (c.company ? '<div>Company: '+esc(c.company)+'</div>' : '') +
+      (c.address ? '<div>Address: '+esc(c.address)+'</div>' : '') +
+      '<div>Opportunities: '+dealCount+'</div>' +
+      '<div class="dup-actions" data-dup-id="'+esc(c.id)+'" style="margin-top:6px;"></div>' +
+    '</div>';
+  }
+  // Renders the duplicate panel directly under the modal header (same slot
+  // style as setModalStatus). opts: { title, intro, strong:[{contact,phone,
+  // email}], nameOnly:[contact], useLabel, onUse(contact), onCreateNew }.
+  // onCreateNew is offered ONLY when there are no strong matches.
+  function showDuplicatePanel(opts){
+    clearDuplicatePanel();
+    var panel = document.createElement('div');
+    panel.className = 'modal-dup-panel';
+    panel.style.cssText = 'margin:-4px 0 14px;padding:10px 12px;border-radius:8px;font-size:12.5px;background:#FBEFC0;color:#4A3A00;';
+    var cards = (opts.strong||[]).map(function(m){ return dupContactCardHtml(m.contact, m.phone && m.email ? 'phone + email match' : (m.phone ? 'phone match' : 'email match')); }).join('') +
+      (opts.nameOnly||[]).map(function(c){ return dupContactCardHtml(c, 'same name'); }).join('');
+    panel.innerHTML = '<div style="font-weight:700;font-size:13.5px;margin-bottom:4px;">'+esc(opts.title)+'</div>' +
+      (opts.intro ? '<div style="margin-bottom:4px;">'+esc(opts.intro)+'</div>' : '') + cards +
+      (opts.onCreateNew ? '<div style="margin-top:8px;"><button type="button" class="btn btn-ghost btn-sm" id="dup-create-new">Create new contact</button></div>' : '') +
+      // Strong-match override (new Contacts only): a deliberate two-step
+      // path. The button only reveals the confirmation; nothing is created
+      // until the box is checked AND the confirm button is pressed.
+      (opts.onOverride ? '<div style="margin-top:8px;"><button type="button" class="btn btn-ghost btn-sm" id="dup-override-start">Create separate contact anyway</button></div>' +
+        '<div id="dup-override-confirm" hidden style="margin-top:8px;padding:8px 10px;border-radius:6px;background:rgba(255,255,255,0.55);">' +
+          '<label style="display:flex;gap:8px;align-items:flex-start;font-weight:600;cursor:pointer;"><input type="checkbox" id="dup-override-check" style="margin-top:2px;"> <span>I have confirmed this is a different person.</span></label>' +
+          '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;"><button type="button" class="btn btn-primary btn-sm" id="dup-override-go" disabled>Create separate contact</button><button type="button" class="btn btn-ghost btn-sm" id="dup-override-cancel">Cancel</button></div>' +
+        '</div>' : '');
+    var head = modalBox.querySelector('.modal-head');
+    var status = modalBox.querySelector('.modal-save-status');
+    var anchor = status || head;
+    if (anchor && anchor.nextSibling) anchor.parentNode.insertBefore(panel, anchor.nextSibling);
+    else modalBox.insertBefore(panel, modalBox.firstChild);
+    if (opts.onUse){
+      panel.querySelectorAll('.dup-actions').forEach(function(slot){
+        var c = state.contacts[slot.getAttribute('data-dup-id')];
+        if (!c) return;
+        var b = document.createElement('button');
+        b.type = 'button'; b.className = 'btn btn-primary btn-sm'; b.textContent = opts.useLabel || 'Use existing contact';
+        b.addEventListener('click', function(){ opts.onUse(c); });
+        slot.appendChild(b);
+      });
+    }
+    var createBtn = panel.querySelector('#dup-create-new');
+    if (createBtn) createBtn.addEventListener('click', function(){ opts.onCreateNew(); });
+    var ovStart = panel.querySelector('#dup-override-start');
+    if (ovStart){
+      var ovBox = panel.querySelector('#dup-override-confirm'), ovCheck = panel.querySelector('#dup-override-check'), ovGo = panel.querySelector('#dup-override-go');
+      ovStart.addEventListener('click', function(){ ovBox.hidden = false; ovStart.hidden = true; ovCheck.checked = false; ovGo.disabled = true; });
+      ovCheck.addEventListener('change', function(){ ovGo.disabled = !ovCheck.checked; });
+      panel.querySelector('#dup-override-cancel').addEventListener('click', function(){ ovBox.hidden = true; ovStart.hidden = false; ovCheck.checked = false; ovGo.disabled = true; });
+      ovGo.addEventListener('click', function(){
+        if (!ovCheck.checked) return;
+        opts.onOverride((opts.strong||[]).map(function(m){ return m.contact.id; }));
+      });
+    }
+    panel.scrollIntoView && panel.scrollIntoView({ block:'nearest' });
+  }
+  function clearDuplicatePanel(){
+    var p = modalBox.querySelector('.modal-dup-panel');
+    if (p) p.remove();
+  }
+  // A confirmed "different person" override, recorded per modal as
+  // { ids: [acknowledged contact ids], sig: normalized phone|email }. It
+  // only covers the exact phone/email the user confirmed against and the
+  // exact Contacts they were shown — change either and the warning returns.
+  function duplicateOverrideSig(candidate){ return normalizeContactPhone(candidate.phone) + '|' + normalizeContactEmail(candidate.email); }
+  function duplicateOverrideCovers(ack, candidate, strong){
+    if (!ack || ack.sig !== duplicateOverrideSig(candidate)) return false;
+    return strong.every(function(m){ return ack.ids.indexOf(String(m.contact.id)) !== -1; });
   }
 
   // ---------- render shell ----------
@@ -3864,6 +4032,41 @@
     backdrop.hidden = false;
     document.getElementById('dm-close').addEventListener('click', closeModal);
     document.getElementById('dm-cancel').addEventListener('click', closeModal);
+    // Duplicate-prevention state for the NEW-opportunity path only.
+    // pinnedContactId: a specific Contact the user picked from the
+    // duplicate panel ("Use existing contact") — honored only while the
+    // name field still matches that Contact's name, otherwise the lookup
+    // is exactly the original findContactByName().
+    // pendingNewContactId: one stable id for a Contact created from this
+    // modal, so a retry never creates a second copy.
+    var pinnedContactId = null;
+    var dealNameReviewedFor = null;
+    var pendingNewContactId = uid();
+    // Set ONLY by the two-step "Create separate contact anyway" confirmation.
+    var dealDuplicateOverrideAck = null;
+    function resolveSelectedContact(name){
+      var lower = String(name||'').trim().toLowerCase();
+      var pinned = pinnedContactId ? state.contacts[pinnedContactId] : null;
+      if (pinned && (pinned.name||'').trim().toLowerCase() === lower) return pinned;
+      // A Contact this modal already created on the server (a retry after
+      // "Not synced") is that same person, even if another Contact shares
+      // the name. Server-confirmed records carry _version; the optimistic
+      // local copy saveContact() inserts before confirmation does not, and
+      // is never treated as an existing Contact (that could let an
+      // Opportunity be saved against a Contact that was never created).
+      var pending = state.contacts[pendingNewContactId];
+      if (pending && pending._version && (pending.name||'').trim().toLowerCase() === lower) return pending;
+      var found = findContactByName(name);
+      if (found && found.id === pendingNewContactId && !found._version) return null;
+      return found;
+    }
+    function selectExistingContact(c){
+      pinnedContactId = c.id;
+      clearDuplicatePanel();
+      setModalStatus(null, null);
+      var ni = document.getElementById('dm-contact-name');
+      if (ni){ ni.value = c.name || ''; ni.dispatchEvent(new Event('input')); }
+    }
     if (editing){
       document.getElementById('dm-delete').addEventListener('click', function(){
         openConfirmModal('Delete this opportunity?', "This can't be undone.", 'Delete', function(){ deleteDeal(dealId); });
@@ -3902,7 +4105,7 @@
       var addressField = document.getElementById('dm-address-field');
       var accountTypeField = document.getElementById('dm-accounttype-field');
       nameInput.addEventListener('input', function(){
-        var match = findContactByName(nameInput.value);
+        var match = resolveSelectedContact(nameInput.value);
         if (match){
           document.getElementById('dm-phone').value = match.phone || '';
           document.getElementById('dm-email').value = match.email || '';
@@ -4011,7 +4214,8 @@
         var addressField2 = document.getElementById('dm-address');
         var accountTypeField2 = document.getElementById('dm-accounttype');
         if (!contactName) return;
-        var existing = findContactByName(contactName);
+        clearDuplicatePanel();
+        var existing = resolveSelectedContact(contactName);
         var proceedWithContactId = async function(contactId){
           var data = Object.assign({ contactId: contactId, contactName: contactName, createdAt: nowIso(),
             quoteSentAt: stage==='quote_sent' ? nowIso() : null,
@@ -4057,6 +4261,17 @@
             proceedWithContactId(existing.id);
             return;
           }
+          // Editing the SELECTED Contact is an update, not a create: only a
+          // phone/email that is actually changing is checked, and never
+          // against this Contact itself (findUpdateDuplicates excludes
+          // existing.id). It is stopped only if the new value already
+          // belongs to a DIFFERENT Contact.
+          var syncDups = findUpdateDuplicates(existing.id, contactPatch.phone, contactPatch.email);
+          if (syncDups.length){
+            setModalStatus(null, null);
+            showDuplicatePanel({ title: 'That phone number or email belongs to another contact', intro: 'The phone number or email entered for ' + (existing.name||'this contact') + ' already belongs to the contact below, so nothing was saved. If this opportunity is for that person, use that contact instead. Otherwise correct the phone/email. Nothing you’ve entered has been lost.', strong: syncDups, useLabel: 'Use this contact instead', onUse: selectExistingContact });
+            return;
+          }
           // Contact changes must be confirmed BEFORE the Opportunity is saved,
           // using the same result contract as every other modal save:
           // 'saved' proceeds; 'conflict'/'failed' keep the modal open.
@@ -4074,13 +4289,59 @@
             var failedFields = (unconfirmedContactFields && unconfirmedContactFields.contactId === existing.id) ? unconfirmedContactFields.fields : {};
             Object.keys(contactPatch).forEach(function(field){ failedFields[field] = true; });
             unconfirmedContactFields = { contactId: existing.id, fields: failedFields };
-            setModalStatus('failed', 'Contact details didn’t sync — check your connection and click Add opportunity again. The opportunity hasn’t been saved yet, and nothing you’ve entered has been lost.');
+            // A backend duplicate rejection also surfaces as 'failed';
+            // the verification just refreshed state, so re-check it.
+            var lateSyncDups = findUpdateDuplicates(existing.id, contactPatch.phone, contactPatch.email);
+            if (lateSyncDups.length){
+              setModalStatus(null, null);
+              showDuplicatePanel({ title: 'That phone number or email belongs to another contact', intro: 'Another contact with this phone number or email was saved just before yours, so the contact update and the opportunity were not saved. Nothing you’ve entered has been lost.', strong: lateSyncDups, useLabel: 'Use this contact instead', onUse: selectExistingContact });
+            } else {
+              setModalStatus('failed', 'Contact details didn’t sync — check your connection and click Add opportunity again. The opportunity hasn’t been saved yet, and nothing you’ve entered has been lost.');
+            }
           }
         } else {
+          // New customer: check BEFORE any Contact is created.
+          var newCandidate = { name: contactName, phone: phone, email: email };
+          var resubmitDeal = function(){ var f = document.getElementById('deal-form'); if (f) { f.requestSubmit ? f.requestSubmit() : f.dispatchEvent(new Event('submit', { cancelable:true })); } };
+          var dealOverrideAckFn = function(ids){ dealDuplicateOverrideAck = { ids: ids.map(String), sig: duplicateOverrideSig(newCandidate) }; clearDuplicatePanel(); resubmitDeal(); };
+          var newDups = findContactDuplicates(newCandidate, pendingNewContactId);
+          if (newDups.strong.length && !duplicateOverrideCovers(dealDuplicateOverrideAck, newCandidate, newDups.strong)){
+            // Exact phone/email match: nothing is created. Use the existing
+            // contact, or take the deliberate two-step override.
+            setModalStatus(null, null);
+            showDuplicatePanel({ title: 'This contact may already exist', intro: 'The phone number or email you entered already belongs to the contact below, so a new contact was not created. Use the existing contact for this opportunity. If this really is a different person who shares this phone number or email, you can create a separate contact after confirming.', strong: newDups.strong, useLabel: 'Use existing contact', onUse: selectExistingContact, onOverride: dealOverrideAckFn });
+            return;
+          }
+          var dealOverrideOption = newDups.strong.length ? { confirmed: true, acknowledgedIds: dealDuplicateOverrideAck.ids.slice() } : null;
+          if (newDups.nameOnly.length && dealNameReviewedFor !== normalizeContactName(contactName)){
+            setModalStatus(null, null);
+            showDuplicatePanel({ title: 'A contact with this name already exists.', intro: 'Compare the details below. If this is the same person, use the existing contact. If it’s a different person with the same name, create a new contact.', nameOnly: newDups.nameOnly, useLabel: 'Use existing contact', onUse: selectExistingContact,
+              onCreateNew: function(){ dealNameReviewedFor = normalizeContactName(contactName); clearDuplicatePanel(); resubmitDeal(); } });
+            return;
+          }
           var newContact = { name: contactName, phone: phone, email: email, company:'', accountType:'individual', address:'', whereMet:'', affiliations:'', notes:'', createdAt: nowIso() };
-          var newId = uid();
-          saveContact(newId, newContact);
-          proceedWithContactId(newId);
+          var newId = pendingNewContactId;
+          // The Contact must be confirmed BEFORE the Opportunity is saved:
+          // the backend can now refuse a duplicate create, and an
+          // Opportunity must never be saved pointing at a Contact that was
+          // never created.
+          if (submitBtn) submitBtn.disabled = true;
+          setModalStatus(null, null);
+          var newContactResult = await saveContact(newId, newContact, dealOverrideOption ? { silent: true, contactDuplicateOverride: dealOverrideOption } : { silent: true });
+          if (submitBtn) submitBtn.disabled = false;
+          if (newContactResult.status === 'saved'){
+            proceedWithContactId(newId);
+          } else if (newContactResult.status === 'conflict'){
+            setModalStatus('conflict', 'That didn’t sync as expected, so the new contact and opportunity weren’t saved yet. Nothing you’ve entered below has been lost — click Add opportunity again to retry.');
+          } else {
+            var lateNewDups = findContactDuplicates(newCandidate, newId).strong;
+            if (lateNewDups.length && !duplicateOverrideCovers(dealDuplicateOverrideAck, newCandidate, lateNewDups)){
+              setModalStatus(null, null);
+              showDuplicatePanel({ title: 'This contact already exists', intro: 'Another contact with this phone number or email was saved just before yours, so a duplicate was not created and the opportunity wasn’t saved yet. Use the existing contact for this opportunity. Nothing you’ve entered has been lost.', strong: lateNewDups, useLabel: 'Use existing contact', onUse: selectExistingContact, onOverride: dealOverrideAckFn });
+            } else {
+              setModalStatus('failed', 'Not synced — check your connection and click Add opportunity again. The opportunity hasn’t been saved yet, and nothing you’ve entered has been lost.');
+            }
+          }
         }
       }
     });
@@ -4118,14 +4379,44 @@
     document.getElementById('cm-cancel').addEventListener('click', closeModal);
     if (editing){
       document.getElementById('cm-delete').addEventListener('click', function(){
-        openConfirmModal('Delete this contact?', 'Linked opportunities will keep their info but lose the contact link.', 'Delete', function(){ deleteContact(contactId); });
+        openConfirmModal('Delete this contact?', 'This contact can only be deleted if it has no linked opportunities or follow-ups.', 'Delete', async function(){
+          // Keep the contact on screen while the server decides; it is only
+          // removed once the delete is confirmed.
+          if (!state.contacts[contactId]) return;
+          openContactModal(contactId);
+          var form = document.getElementById('contact-form');
+          var delBtn = document.getElementById('cm-delete');
+          if (delBtn){ delBtn.disabled = true; delBtn.textContent = 'Deleting…'; }
+          var res = await deleteContact(contactId);
+          var stillOpen = form && form.isConnected;
+          var msg = res.status === 'blocked' ? contactLinkedMessage(res.links)
+            : 'Delete not confirmed — the contact was not removed. Please try again.';
+          if (res.status === 'deleted'){
+            if (stillOpen) closeModal();
+          } else if (stillOpen){
+            if (delBtn){ delBtn.disabled = false; delBtn.textContent = 'Delete'; }
+            setModalStatus('failed', msg);
+          } else if (backdrop.hidden){
+            openConfirmModal('Contact not deleted', msg, 'OK', function(){});
+          }
+        });
       });
       var logFollowupBtn = document.getElementById('cm-log-followup');
       if (logFollowupBtn){ logFollowupBtn.addEventListener('click', function(){ openLogFollowupModal(contactId, null); }); }
     }
-    document.getElementById('contact-form').addEventListener('submit', async function(e){
+    // A new Contact keeps ONE id for the life of this modal, so a retry
+    // after a "Not synced" result (where the first create may actually have
+    // landed) updates that same record instead of creating a second one.
+    var createId = editing ? contactId : uid();
+    // Normalized name the user explicitly chose "Create new contact" for
+    // after reviewing a same-name match (Rule C). Reset if the name changes.
+    var nameReviewedFor = null;
+    // Set ONLY by the two-step "Create separate contact anyway" confirmation.
+    var duplicateOverrideAck = null;
+    var contactForm = document.getElementById('contact-form');
+    contactForm.addEventListener('submit', async function(e){
       e.preventDefault();
-      var submitBtn = e.target.querySelector('button[type="submit"]');
+      var submitBtn = contactForm.querySelector('button[type="submit"]');
       var data = {
         name: document.getElementById('cm-name').value.trim(),
         accountType: document.getElementById('cm-accounttype').value,
@@ -4136,20 +4427,67 @@
         address: document.getElementById('cm-address').value.trim(),
         affiliations: document.getElementById('cm-affil').value.trim(),
         notes: document.getElementById('cm-notes').value.trim(),
-        createdAt: editing ? editing.createdAt : nowIso(),
-        updatedAt: nowIso()
+        createdAt: editing ? editing.createdAt : nowIso()
+        // updatedAt intentionally NOT sent: handleSaveContact() always
+        // stamps its own server time, so a client value can never match on
+        // verification and made every save here read back as "Not synced"
+        // (and a retry then created a second Contact).
       };
       if (!data.name) return;
+      clearDuplicatePanel();
+      var openExisting = function(c){ openContactModal(c.id); };
+      var resubmitContact = function(){ contactForm.requestSubmit ? contactForm.requestSubmit() : contactForm.dispatchEvent(new Event('submit', { cancelable:true })); };
+      var overrideOption = null;
+      if (!editing){
+        var dups = findContactDuplicates(data, createId);
+        if (dups.strong.length && !duplicateOverrideCovers(duplicateOverrideAck, data, dups.strong)){
+          // Exact phone/email match: nothing is created. The user can open
+          // the existing contact, or take the deliberate two-step override.
+          setModalStatus(null, null);
+          showDuplicatePanel({ title: 'This contact may already exist', intro: 'The phone number or email you entered already belongs to the contact below, so a new contact was not created. Open the existing contact to review or update it. If this really is a different person who shares this phone number or email, you can create a separate contact after confirming.', strong: dups.strong, useLabel: 'Open existing contact', onUse: openExisting,
+            onOverride: function(ids){ duplicateOverrideAck = { ids: ids.map(String), sig: duplicateOverrideSig(data) }; clearDuplicatePanel(); resubmitContact(); } });
+          return;
+        }
+        if (dups.strong.length) overrideOption = { confirmed: true, acknowledgedIds: duplicateOverrideAck.ids.slice() };
+        if (dups.nameOnly.length && nameReviewedFor !== normalizeContactName(data.name)){
+          setModalStatus(null, null);
+          showDuplicatePanel({ title: 'A contact with this name already exists.', intro: 'Compare the details below. If this is the same person, open the existing contact. If it\u2019s a different person with the same name, create a new contact.', nameOnly: dups.nameOnly, useLabel: 'Use existing contact', onUse: openExisting,
+            onCreateNew: function(){ nameReviewedFor = normalizeContactName(data.name); clearDuplicatePanel(); resubmitContact(); } });
+          return;
+        }
+      } else {
+        var updDups = findUpdateDuplicates(contactId, data.phone, data.email);
+        if (updDups.length){
+          setModalStatus(null, null);
+          showDuplicatePanel({ title: 'That phone number or email belongs to another contact', intro: 'This change was not saved, because it would give this contact the same phone number or email as the contact below. Nothing you\u2019ve entered has been lost.', strong: updDups, useLabel: 'Open that contact', onUse: openExisting });
+          return;
+        }
+      }
       if (submitBtn) submitBtn.disabled = true;
       setModalStatus(null, null);
-      var result = await saveContact(contactId, data, { silent: true });
+      var result = await saveContact(createId, data, overrideOption ? { silent: true, contactDuplicateOverride: overrideOption } : { silent: true });
       if (submitBtn) submitBtn.disabled = false;
       if (result.status === 'saved'){
         closeModal();
       } else if (result.status === 'conflict'){
         setModalStatus('conflict', 'Someone else updated this contact while you were editing. Nothing you\u2019ve entered below has been lost \u2014 click Save again to apply it on top of their update, or Cancel to review the latest version first.');
       } else {
-        setModalStatus('failed', 'Not synced \u2014 check your connection and click Save again. Nothing you\u2019ve entered has been lost.');
+        // The backend rejects a duplicate inside its write lock, which the
+        // browser sees as "not confirmed". The failed verification has just
+        // refreshed state from the server, so re-check against that fresh
+        // data to tell a duplicate (e.g. someone else added this person a
+        // moment ago) apart from a connection problem.
+        var lateDups = editing ? findUpdateDuplicates(contactId, data.phone, data.email) : findContactDuplicates(data, createId).strong;
+        // A match the user already confirmed past is not a reason to stop
+        // here; only one they have NOT seen is (the backend applies the
+        // same rule), otherwise this is a connection problem.
+        if (lateDups.length && !(!editing && duplicateOverrideCovers(duplicateOverrideAck, data, lateDups))){
+          setModalStatus(null, null);
+          showDuplicatePanel({ title: 'This contact already exists', intro: 'Another contact with this phone number or email was saved just before yours, so this save was stopped to avoid a duplicate. Nothing you\u2019ve entered has been lost.', strong: lateDups, useLabel: 'Open existing contact', onUse: openExisting,
+            onOverride: editing ? null : function(ids){ duplicateOverrideAck = { ids: ids.map(String), sig: duplicateOverrideSig(data) }; clearDuplicatePanel(); resubmitContact(); } });
+        } else {
+          setModalStatus('failed', 'Not synced \u2014 check your connection and click Save again. Nothing you\u2019ve entered has been lost.');
+        }
       }
     });
   }
