@@ -354,6 +354,12 @@
     color: var(--color-sidebar-text); font-size:10.5px; font-weight:600; padding:6px 4px; border-radius:8px; min-width:56px; cursor:pointer; }
   .bnav-item svg { width:21px; height:21px; }
   .bnav-item.active { color: var(--color-sidebar-text-active); }
+  .sync-pill { display:none; }
+  @media (max-width: 860px) {
+    .sync-pill.show { display:flex; align-items:center; gap:6px; position:fixed; left:50%; transform:translateX(-50%); top: calc(58px + env(safe-area-inset-top, 0px)); z-index:430;
+      background: var(--color-sidebar-bg, #071A42); color:#fff; font-size:12.5px; font-weight:600; padding:7px 12px; border-radius:999px; box-shadow:0 2px 10px rgba(0,0,0,0.25); max-width: calc(100vw - 32px); white-space:nowrap; pointer-events:none; }
+    .sync-pill.show[data-status="failed"], .sync-pill.show[data-status="conflict"] { background: var(--color-danger, #B4543F); }
+  }
   .more-sheet-backdrop { display:none; position:fixed; inset:0; background:rgba(7,26,66,0.5); z-index:410; }
   .more-sheet-backdrop.show { display:block; }
   .more-sheet { position:fixed; left:0; right:0; bottom:0; z-index:420; background: var(--color-surface);
@@ -506,23 +512,43 @@
         </div>
         <div id="db-banner"></div>
 
-        <div class="section-label">Daily goals &mdash; <span id="daily-date-label"></span></div>
-        <div class="kpi-grid" id="daily-kpi-grid"></div>
-
-        <div class="section-label" style="margin-top:22px;">Weekly goals &mdash; <span id="weekly-range-label"></span></div>
-        <div class="kpi-grid" id="weekly-kpi-grid"></div>
-        <div id="monthly-pace-card"></div>
-
-        <div class="section-label" style="margin-top:22px;">Monthly goals</div>
-        <div class="month-switch">
-          <button id="month-prev" aria-label="Previous month">&larr;</button>
-          <div class="month-label" id="month-label">&mdash;</div>
-          <button id="month-next" aria-label="Next month">&rarr;</button>
-          <button class="today-link" id="month-today">Jump to this month</button>
-          <span class="goal-basis-note" id="goal-basis-note"></span>
+        <!-- Daily / Weekly / Monthly switches ONLY the performance/goal
+             sections below (data-dash-period groups). Everything else on the
+             Dashboard is always shown. Purely client-side: no reload, no
+             backend call. -->
+        <div class="seg-control" id="dashboard-period" role="group" aria-label="Performance period" style="margin-bottom:16px; width:max-content;">
+          <button type="button" data-period="daily" class="active" aria-pressed="true">Daily</button>
+          <button type="button" data-period="weekly" aria-pressed="false">Weekly</button>
+          <button type="button" data-period="monthly" aria-pressed="false">Monthly</button>
         </div>
-        <div class="kpi-grid" id="kpi-grid"></div>
-        <div class="kpi-legend" id="kpi-legend"></div>
+
+        <div data-dash-period="daily">
+          <div class="section-label">Previous business day &mdash; <span id="prev-day-label"></span></div>
+          <div class="kpi-grid" id="prev-day-kpi-grid"></div>
+          <div class="section-label" style="margin-top:22px;">Today's daily goals &mdash; <span id="daily-date-label"></span></div>
+          <div class="kpi-grid" id="daily-kpi-grid"></div>
+        </div>
+
+        <div data-dash-period="weekly" hidden>
+          <div class="section-label">Previous week &mdash; <span id="prev-week-label"></span></div>
+          <div class="kpi-grid" id="prev-week-kpi-grid"></div>
+          <div class="section-label" style="margin-top:22px;">Current week performance to plan &mdash; <span id="weekly-range-label"></span></div>
+          <div class="kpi-grid" id="weekly-kpi-grid"></div>
+        </div>
+
+        <div data-dash-period="monthly" hidden>
+          <div id="monthly-pace-card"></div>
+          <div class="section-label" style="margin-top:22px;">Monthly goals</div>
+          <div class="month-switch">
+            <button id="month-prev" aria-label="Previous month">&larr;</button>
+            <div class="month-label" id="month-label">&mdash;</div>
+            <button id="month-next" aria-label="Next month">&rarr;</button>
+            <button class="today-link" id="month-today">Jump to this month</button>
+            <span class="goal-basis-note" id="goal-basis-note"></span>
+          </div>
+          <div class="kpi-grid" id="kpi-grid"></div>
+          <div class="kpi-legend" id="kpi-legend"></div>
+        </div>
         <div class="stat-row" id="stat-row"></div>
 
         <div class="two-col">
@@ -731,6 +757,7 @@
           <div>
             <h1 class="page-title">Contacts</h1>
             <div class="page-sub">Everyone you've quoted, met, or worked with.</div>
+            <div class="page-sub" id="contacts-total" style="margin-top:4px;font-weight:600;color:var(--color-text);"></div>
           </div>
           <div class="head-actions" id="contacts-head-actions"><button class="btn btn-ghost" id="export-contacts-btn">Export contacts (CSV)</button><button class="btn btn-primary" id="add-contact-btn">+ New contact</button></div>
         </div>
@@ -807,6 +834,7 @@
   </main>
 
   <nav class="bottom-nav" id="bottom-nav" aria-label="Primary"></nav>
+  <div class="sync-pill" id="sync-pill" role="status" aria-live="polite"></div>
   <div class="more-sheet-backdrop" id="more-sheet-backdrop"></div>
   <div class="more-sheet" id="more-sheet" role="dialog" aria-modal="true" aria-label="More">
     <div class="more-sheet-title">More</div>
@@ -875,6 +903,9 @@
     dailyWeeklyTargets: null, // populated from the meta sheet once loaded; DEFAULT_DAILY_WEEKLY_TARGETS used until then
     goalsHistory: {},   // monthKey -> {leadsGoal,quotesGoal,closedGoal,revenueGoal,updatedAt}
     monthOffset: 0,
+    // Dashboard Daily/Weekly/Monthly performance filter. In memory only
+    // (like monthOffset), so every launch/login starts on Daily.
+    dashboardPeriod: 'daily',
     contactSearch: '',
     accountFilter: 'all',
     remoteConnected: false,
@@ -974,6 +1005,10 @@
       local:    '<span class="sync-dot off"></span>Saved on this device only'
     };
     el2.innerHTML = map[status] || map.idle;
+    // Phone-visible copy of the same status (the sidebar badge is hidden on
+    // phones). Shown for every state except idle; CSS shows it on phones only.
+    var pill = document.getElementById('sync-pill');
+    if (pill){ pill.innerHTML = map[status] || ''; pill.classList.toggle('show', !!map[status] && status !== 'idle'); pill.setAttribute('data-status', status); }
   }
   function scheduleIdle(){ setTimeout(function(){ if (state.syncStatus==='saved') setSyncBadge('idle'); }, 2500); }
 
@@ -1007,8 +1042,98 @@
     // override carries it; it rides outside `data`, so it is never stored
     // and never part of the field verification below.
     if (sheetName === 'contacts' && options && options.contactDuplicateOverride) postBody.contactDuplicateOverride = options.contactDuplicateOverride;
+    if (DIRECT_CONFIRM_SHEETS[sheetName]){
+      // Read the server's own reply to this save; anything short of a clear,
+      // matching success falls back to verifyWrite() exactly as before.
+      return apiPostWithResponse(postBody).then(function(resp){
+        return confirmFromSaveResponse(sheetName, id, data, expectedVersion, startedAt, options||{}, resp);
+      });
+    }
     apiPostRaw(postBody);
     return verifyWrite(sheetName, id, data, expectedVersion, startedAt, 0, options||{});
+  }
+  // ---------- direct save confirmation (with full re-read fallback) ----------
+  // Sheets whose Apps Script save handler returns the just-written record
+  // (see saveConfirmation_ in Code.gs). 'meta' is not listed and keeps the
+  // re-read-only path.
+  var DIRECT_CONFIRM_SHEETS = { contacts:true, deals:true, tasks:true, goals:true, followups:true };
+  // How long to wait for the save's reply before falling back to the
+  // re-read path (the write may still land; the re-read finds out).
+  var SAVE_RESPONSE_TIMEOUT_MS = 5000;
+  // Server errors that are returned BEFORE anything is written (validation,
+  // permission, lock, duplicate). Anything else unexpected is treated as
+  // ambiguous and goes through the full re-read instead.
+  var DEFINITIVE_SAVE_ERRORS = { duplicate_contact:true, forbidden:true, lock_timeout:true, invalid_request:true };
+  // Same request as apiPostRaw (same URL, same plain-text JSON body, same
+  // token, no cookies, no custom headers — still a CORS "simple request",
+  // so no preflight), but in normal CORS mode so the JSON reply Apps Script
+  // already returns can be read. Resolves to the parsed reply, or null if it
+  // can't be read for any reason (network, CORS, timeout, non-JSON). Never
+  // re-sends the write.
+  function apiPostWithResponse(body){
+    if (!scriptConfigured()) return Promise.resolve(null);
+    body = Object.assign({ token: state.sessionToken }, body);
+    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function(){ ctrl.abort(); }, SAVE_RESPONSE_TIMEOUT_MS) : null;
+    return fetch(SCRIPT_URL, { method:'POST', body: JSON.stringify(body), credentials:'omit', redirect:'follow', signal: ctrl ? ctrl.signal : undefined })
+      .then(function(r){ return r && r.ok ? r.text() : null; })
+      .then(function(t){ if (!t) return null; try { return JSON.parse(t); } catch(e){ return null; } })
+      .catch(function(){ return null; })
+      .then(function(v){ if (timer) clearTimeout(timer); return v; });
+  }
+  // Decides what the save's own reply proves. 'saved' ONLY when the reply is
+  // a success for exactly this sheet + id, at exactly expectedVersion + 1,
+  // written by this user, and the record the server read back after writing
+  // holds every submitted field (same field rule as verifyWrite). Otherwise:
+  // a definitive pre-write refusal -> 'failed' after one authoritative
+  // read; everything else (unreadable, timeout, version_conflict, unknown
+  // error, any mismatch) -> the original verifyWrite() re-read path.
+  async function confirmFromSaveResponse(sheetName, id, data, expectedVersion, startedAt, options, resp){
+    var res = (resp && typeof resp === 'object') ? resp : null;
+    if (res && res.ok === true){
+      var rec = res.record;
+      var me = state.currentUser && state.currentUser.email;
+      var matches = res.sheet === sheetName && String(res.id) === String(id) &&
+        Number(res.version) === (expectedVersion||0) + 1 &&
+        rec && typeof rec === 'object' && String(rec.id) === String(id) &&
+        Number(rec._version) === Number(res.version) && !!me && rec.updatedBy === me;
+      if (matches){
+        var META = { updatedAt:true, updatedBy:true, _version:true, createdAt:true, createdBy:true };
+        var fields = sheetName === 'deals' ? Object.keys(data).filter(function(k){ return !META[k]; }) : Object.keys(data);
+        if (fields.every(function(k){ return sameValue(rec[k], data[k]); })){
+          applyConfirmedRecord(sheetName, rec);
+          setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle();
+          return { status:'saved', record: rec };
+        }
+      }
+      return verifyWrite(sheetName, id, data, expectedVersion, startedAt, 0, options);
+    }
+    if (res && res.ok === false && res.error){
+      if (handleAuthError(res.error)){ setSyncBadge('failed'); return { status:'failed', record:null, error: res.error }; }
+      if (DEFINITIVE_SAVE_ERRORS[res.error]){
+        // Nothing was written. One authoritative read so the screen — and
+        // any duplicate explanation built from it — reflects the server.
+        var snap = null;
+        try { snap = await apiGetAll(); } catch(e){ snap = null; }
+        if (snap && snap.ok) applyRemoteSnapshot(snap);
+        var key = STATE_KEY_FOR_SHEET[sheetName];
+        var current = (snap && snap.ok ? (snap[sheetName]||[]).filter(function(r){ return String(r.id) === String(id); })[0] : null) || null;
+        setSyncBadge('failed');
+        return { status:'failed', record: current || (state[key] ? state[key][id] : null) || null, error: res.error };
+      }
+    }
+    return verifyWrite(sheetName, id, data, expectedVersion, startedAt, 0, options);
+  }
+  // Puts a server-confirmed record into local state, keeping the same
+  // protection applyRemoteSnapshot gives a deal with edits still queued
+  // (its pending field values stay on screen; _version etc. come from the
+  // server so the next queued write uses the confirmed version).
+  function applyConfirmedRecord(sheetName, rec){
+    var key = STATE_KEY_FOR_SHEET[sheetName];
+    if (!state[key]) state[key] = {};
+    if (sheetName === 'deals' && dealPendingFields[rec.id]) state.deals[rec.id] = Object.assign({}, rec, dealPendingFields[rec.id]);
+    else state[key][rec.id] = rec;
+    persistLocal(); render();
   }
   // Tolerant equality for comparing a submitted field value against what the
   // server reads back — Sheets can round-trip a number/boolean through a
@@ -1992,8 +2117,11 @@
     var end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 7);
     return { start:start, end:end };
   }
-  function computeDailyMetrics(){
-    var dayStart = new Date(); dayStart.setHours(0,0,0,0);
+  // dayDate (optional): any moment within the calendar day to measure;
+  // omitted = today, exactly as before. Used unchanged for the Previous
+  // Business Day section so both use one definition of each daily metric.
+  function computeDailyMetrics(dayDate){
+    var dayStart = dayDate ? new Date(dayDate.getTime()) : new Date(); dayStart.setHours(0,0,0,0);
     var dayEnd = new Date(dayStart.getTime() + 86400000);
     var contacts = Object.keys(state.contacts).map(function(k){ return state.contacts[k]; });
     var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
@@ -2005,8 +2133,10 @@
       jobsScheduled: deals.filter(function(d){ return inRange(d.scheduledAt, dayStart, dayEnd); }).length
     };
   }
-  function computeWeeklyMetrics(){
-    var wb = weekBounds();
+  // wbArg (optional): {start,end} of the Sun–Sat week to measure;
+  // omitted = the current week, exactly as before.
+  function computeWeeklyMetrics(wbArg){
+    var wb = wbArg || weekBounds();
     var contacts = Object.keys(state.contacts).map(function(k){ return state.contacts[k]; });
     var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
     // Revenue: same field (quoteAmount) and same event (closedAt, isRealized)
@@ -2059,12 +2189,15 @@
     if (status === 'red') return 'Behind pace';
     return '';
   }
-  function buildActivityKpiCard(label, actual, target, status, fmt){
+  // statusLabelFn (optional): wording for the status; omitted = the
+  // existing "On pace / Close to pace / Behind pace" wording. Completed
+  // periods pass closedPeriodStatusLabel instead.
+  function buildActivityKpiCard(label, actual, target, status, fmt, statusLabelFn){
     fmt = fmt || function(n){ return n; };
     var pct = target > 0 ? Math.min(100, Math.round((actual / target) * 100)) : 0;
     var statusClass = status ? ' status-'+status : '';
     var barColor = (status === 'yellow') ? 'var(--color-accent-ink)' : (status ? '#fff' : 'var(--color-accent)');
-    var statusLabel = activityStatusLabel(status);
+    var statusLabel = (statusLabelFn || activityStatusLabel)(status);
     return '<div class="kpi-card'+statusClass+'">' +
       '<div class="kpi-label">'+esc(label)+'</div>' +
       '<div class="kpi-num-row"><span class="kpi-actual">'+fmt(actual)+'</span><span class="kpi-goal">of '+fmt(target)+' target</span></div>' +
@@ -2107,7 +2240,7 @@
     var monthKey = monthKeyOf(new Date());
     var monthlyGoals = getEffectiveGoals(monthKey) || { revenueGoal:0 };
     var totalDaysInMonth = Math.round((monthBounds.end - monthBounds.start) / 86400000);
-    var weeklyRevenueTarget = (monthlyGoals.revenueGoal||0) * 12 / 52;
+    var weeklyRevenueTarget = weeklyRevenueTargetFor(new Date());
 
     var cards = [
       ['New contacts', m.newContacts, t.newContactsWeekly],
@@ -2146,9 +2279,94 @@
     }
   }
 
+  // Weekly Revenue target = the Monthly Revenue Goal in effect for the
+  // month containing `onDate`, × 12/52 (the existing rule; see above).
+  function weeklyRevenueTargetFor(onDate){
+    var g = getEffectiveGoals(monthKeyOf(onDate)) || { revenueGoal:0 };
+    return (g.revenueGoal||0) * 12 / 52;
+  }
+  // Wording for a COMPLETED period (same words the Monthly section already
+  // uses for a closed month).
+  function closedPeriodStatusLabel(status){
+    if (status === 'green') return 'Goal met';
+    if (status === 'yellow') return 'Close to goal';
+    if (status === 'red') return 'Missed goal';
+    return '';
+  }
+  // Last completed business day: step back one day, then skip Saturday and
+  // Sunday (Mon → Fri, Tue → Mon, …). Holidays are not modeled.
+  function previousBusinessDay(from){
+    var d = new Date(from.getFullYear(), from.getMonth(), from.getDate() - 1);
+    while (d.getDay() === 0 || d.getDay() === 6) d = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1);
+    return d;
+  }
+  // The last COMPLETED Sun–Sat reporting week (the same week definition
+  // as weekBounds()), not a rolling 7 days.
+  function previousWeekBounds(){
+    var cur = weekBounds();
+    return { start: new Date(cur.start.getFullYear(), cur.start.getMonth(), cur.start.getDate() - 7), end: new Date(cur.start.getTime()) };
+  }
+  function renderPreviousBusinessDay(){
+    var day = previousBusinessDay(new Date());
+    document.getElementById('prev-day-label').textContent = day.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric' });
+    var m = computeDailyMetrics(day);
+    var t = Object.assign({}, DEFAULT_DAILY_WEEKLY_TARGETS, state.dailyWeeklyTargets || {});
+    var cards = [
+      ['New contacts', m.newContacts, t.newContactsDaily],
+      ['Follow-ups', m.followups, t.followupsDaily],
+      ['Quotes sent', m.quotesSent, t.quotesSentDaily],
+      ['Jobs scheduled', m.jobsScheduled, t.jobsScheduledDaily]
+    ];
+    document.getElementById('prev-day-kpi-grid').innerHTML = cards.map(function(c){
+      return buildActivityKpiCard(c[0], c[1], c[2], computeActivityStatus(c[1], c[2]), null, closedPeriodStatusLabel);
+    }).join('');
+  }
+  function renderPreviousWeek(){
+    var wb = previousWeekBounds();
+    var lastDay = new Date(wb.end.getFullYear(), wb.end.getMonth(), wb.end.getDate() - 1);
+    document.getElementById('prev-week-label').textContent = wb.start.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' – ' + lastDay.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    var m = computeWeeklyMetrics(wb);
+    var t = Object.assign({}, DEFAULT_DAILY_WEEKLY_TARGETS, state.dailyWeeklyTargets || {});
+    // Completed week = the existing weekly pace rule evaluated at the end of
+    // the week (weeklyExpectedFraction(Saturday) = 1.0, i.e. the full
+    // weekly target) — not today's partial-week pace.
+    var fullWeek = weeklyExpectedFraction(lastDay);
+    var revTarget = weeklyRevenueTargetFor(lastDay);
+    var cards = [
+      ['New contacts', m.newContacts, t.newContactsWeekly],
+      ['Quotes sent', m.quotesSent, t.quotesSentWeekly],
+      ['Jobs scheduled', m.jobsScheduled, t.jobsScheduledWeekly],
+      ['Jobs completed', m.jobsCompleted, t.jobsCompletedWeekly]
+    ];
+    var html = cards.map(function(c){
+      return buildActivityKpiCard(c[0], c[1], c[2], computeWeeklyPaceStatus(c[1], c[2], fullWeek), null, closedPeriodStatusLabel);
+    }).join('');
+    html += buildActivityKpiCard('Revenue', m.revenue, revTarget, computeWeeklyPaceStatus(m.revenue, revTarget, fullWeek), fmtMoneyPrecise, closedPeriodStatusLabel);
+    document.getElementById('prev-week-kpi-grid').innerHTML = html;
+  }
+  // Shows only the selected period's performance/goal group.
+  function applyDashboardPeriod(){
+    var period = state.dashboardPeriod || 'daily';
+    document.querySelectorAll('[data-dash-period]').forEach(function(g){ g.hidden = g.getAttribute('data-dash-period') !== period; });
+    document.querySelectorAll('#dashboard-period button').forEach(function(b){
+      var on = b.getAttribute('data-period') === period;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  document.querySelectorAll('#dashboard-period button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      state.dashboardPeriod = btn.getAttribute('data-period');
+      applyDashboardPeriod();
+    });
+  });
+
   // ---------- dashboard ----------
   function renderDashboard(){
+    applyDashboardPeriod();
+    renderPreviousBusinessDay();
     renderDailyGoals();
+    renderPreviousWeek();
     renderWeeklyGoals();
     var bounds = getMonthBounds(state.monthOffset);
     document.getElementById('month-label').textContent = bounds.label;
@@ -3276,12 +3494,14 @@
       if (t.assignedTo) metaParts.push('Assigned to '+t.assignedTo);
       if (linkedDeal) metaParts.push('Re: '+(linkedDeal.title||'Untitled job'));
       var pct = Number(t.percentComplete)||0;
+      var taskContact = taskContactFor(t);
 
       var row = el(
         '<div class="task-row" style="cursor:pointer; align-items:flex-start;">' +
           '<div style="flex:1; min-width:0;">' +
             '<div class="t-title">'+esc(t.title)+dueBadge+'</div>' +
             '<div class="t-meta">'+esc(metaParts.join(' \u00b7 '))+'</div>' +
+            (taskContact ? '<div class="t-meta" data-task-contact>Contact: '+esc(taskContact.name||'')+'</div>' : '') +
             '<div class="task-progress-row"></div>' +
             (t.notes ? '<div class="task-note-preview">'+esc(t.notes)+'</div>' : '') +
             '<button type="button" class="btn btn-ghost btn-sm" data-add-note style="margin-top:6px;">'+(t.notes?'Edit note':'+ Add note')+'</button>' +
@@ -3361,6 +3581,7 @@
           '<div style="flex:1;min-width:0;">' +
             '<div class="t-title">\u2713 '+esc(t.title)+'</div>' +
             '<div class="t-meta">'+esc(metaParts.join(' \u00b7 '))+'</div>' +
+            (taskContactFor(t) ? '<div class="t-meta" data-task-contact>Contact: '+esc(taskContactFor(t).name||'')+'</div>' : '') +
             (t.notes ? '<div class="task-note-preview">'+esc(t.notes)+'</div>' : '') +
             '<div class="t-meta">'+completionLine+'</div>' +
           '</div>' +
@@ -3478,6 +3699,35 @@
     Object.keys(state.tasks).forEach(function(k){ var a = state.tasks[k].assignedTo; if (a) names[a] = true; });
     return Object.keys(names).sort();
   }
+  // ---------- Task ↔ Contact linkage (additive to the Opportunity link) ----------
+  // A Task's Contact is stored by id (task.contactId). For display, a task
+  // with no contactId but a linked Opportunity shows that Opportunity's
+  // Contact (read-only, nothing is written back).
+  function taskContactFor(t){
+    if (t && t.contactId && state.contacts[t.contactId]) return state.contacts[t.contactId];
+    var d = t && t.dealId ? state.deals[t.dealId] : null;
+    return d && d.contactId && state.contacts[d.contactId] ? state.contacts[d.contactId] : null;
+  }
+  // Type-ahead labels: name plus a phone/email/company hint so two people
+  // with the same name can be told apart. label -> contact id.
+  function taskContactOptions(){
+    var byLabel = {};
+    Object.keys(state.contacts).map(function(k){ return state.contacts[k]; })
+      .filter(function(c){ return c && c._version; }) // confirmed contacts only
+      .sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); })
+      .forEach(function(c){
+        var hint = [c.phone != null ? String(c.phone) : '', c.email, c.company].filter(Boolean)[0];
+        var label = (c.name||'(no name)') + (hint ? ' — ' + hint : '');
+        if (byLabel[label]) label += ' (' + String(c.id).slice(-4) + ')';
+        byLabel[label] = c.id;
+      });
+    return byLabel;
+  }
+  function taskContactLabel(byLabel, contactId){
+    var found = Object.keys(byLabel).filter(function(l){ return byLabel[l] === contactId; })[0];
+    return found || '';
+  }
+
   function openTaskModal(taskId, presetDealId){
     var editing = taskId ? state.tasks[taskId] : null;
     var effectivePresetDealId = presetDealId || (editing ? editing.dealId : null);
@@ -3485,6 +3735,7 @@
     var openDeals = Object.keys(state.deals).map(function(k){ return state.deals[k]; }).filter(function(d){ return !d.archived; }).sort(function(a,b){ return new Date(b.createdAt||0) - new Date(a.createdAt||0); });
     var presetDeal = effectivePresetDealId ? state.deals[effectivePresetDealId] : null;
     var lockedField = (editing && editing.done) ? 'disabled' : '';
+    var contactOptions = taskContactOptions();
     modalBox.innerHTML =
       '<div class="modal-head"><div class="modal-title">'+(editing ? 'Edit task' : 'New task')+'</div><button class="modal-close" id="nt-close">&times;</button></div>' +
       (editing && editing.updatedBy ? '<div class="last-updated-line" style="margin-top:-10px;">'+lastUpdatedLine(editing)+'</div>' : '') +
@@ -3503,6 +3754,9 @@
           }).join('') +
         '</select></div>' +
         (presetDeal ? '<div style="font-size:12px;color:var(--color-text-muted);margin:-8px 0 12px;">Linked to: '+esc(presetDeal.title||'Untitled job')+'</div>' : '') +
+        '<div class="form-field full"><label for="nt-contact">Link to a contact (optional)</label><input id="nt-contact" list="nt-contact-list" placeholder="Start typing a name, phone, or email" autocomplete="off" value="'+esc(taskContactLabel(contactOptions, editing ? editing.contactId : null))+'" '+lockedField+'></div>' +
+        '<datalist id="nt-contact-list">'+Object.keys(contactOptions).map(function(l){ return '<option value="'+esc(l)+'">'; }).join('')+'</datalist>' +
+        '<div id="nt-contact-note" hidden style="font-size:12px;color:var(--color-text-muted);margin:-8px 0 12px;"></div>' +
         '<div class="form-field full"><label for="nt-notes">Note</label><textarea id="nt-notes" placeholder="e.g. Called customer \u2014 waiting on insurance approval." '+lockedField+'>'+esc(editing ? (editing.notes||'') : '')+'</textarea></div>' +
         (editing && editing.done ? '<div style="font-size:12px;color:var(--color-text-muted);margin:-8px 0 12px;">This task is completed \u2014 Reopen it from Completed Tasks to make changes.</div>' : '') +
         '<div class="modal-actions">' +
@@ -3518,6 +3772,36 @@
         openConfirmModal('Delete this task?', "This can't be undone.", 'Delete', function(){ deleteTask(taskId); });
       });
     }
+    // Contact field: resolves only to an existing contact chosen from the
+    // list (never creates one). Choosing an Opportunity that has a Contact
+    // fills an EMPTY Contact field with it; a different contact the user
+    // already chose is never overwritten — a note offers to switch.
+    var ntContact = document.getElementById('nt-contact');
+    var ntNote = document.getElementById('nt-contact-note');
+    function ntShowNote(html){ ntNote.innerHTML = html || ''; ntNote.hidden = !html; }
+    function ntSelectedContactId(){
+      var v = ntContact.value.trim();
+      if (!v) return null;
+      return contactOptions.hasOwnProperty(v) ? contactOptions[v] : undefined; // undefined = typed text that isn't a contact
+    }
+    ntContact.addEventListener('input', function(){ ntShowNote(''); });
+    document.getElementById('nt-deal').addEventListener('change', function(){
+      ntShowNote('');
+      var d = state.deals[this.value];
+      if (!d || !d.contactId || !state.contacts[d.contactId]) return; // no contact on the opportunity: don't guess
+      var dealContactId = d.contactId;
+      var dealLabel = taskContactLabel(contactOptions, dealContactId);
+      if (!dealLabel) return;
+      var current = ntSelectedContactId();
+      if (current === null){
+        ntContact.value = dealLabel;
+        ntShowNote('Contact filled in from the selected opportunity.');
+      } else if (current !== dealContactId){
+        var dealContact = state.contacts[dealContactId];
+        ntShowNote('This opportunity belongs to <strong>'+esc(dealContact.name||'another contact')+'</strong>, not the contact you chose. Keeping your choice. <button type="button" class="btn btn-ghost btn-sm" id="nt-use-deal-contact">Use '+esc(dealContact.name||'that contact')+' instead</button>');
+        document.getElementById('nt-use-deal-contact').addEventListener('click', function(){ ntContact.value = dealLabel; ntShowNote(''); });
+      }
+    });
     document.getElementById('new-task-form').addEventListener('submit', async function(e){
       e.preventDefault();
       var submitBtn = e.target.querySelector('button[type="submit"]');
@@ -3527,13 +3811,22 @@
       var dealId = document.getElementById('nt-deal').value;
       var notes = document.getElementById('nt-notes').value.trim();
       if (!title) return;
+      var contactId = ntSelectedContactId();
+      if (contactId === undefined){
+        setModalStatus('failed', 'Choose a contact from the list, or clear the Contact field. New contacts can\u2019t be created from a task.');
+        return;
+      }
       if (submitBtn) submitBtn.disabled = true;
       setModalStatus(null, null);
       var result;
       if (editing){
-        result = await saveTask(taskId, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, notes:notes, updatedAt: nowIso() }, { silent: true });
+        // updatedAt intentionally NOT sent (same fix as the Contact form):
+        // handleSaveTask() stamps its own server time, so a client value
+        // never matched on verification and every task edit read back as
+        // "Not synced".
+        result = await saveTask(taskId, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, contactId:contactId, notes:notes }, { silent: true });
       } else {
-        result = await saveTask(null, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, notes:notes, done:false, createdAt: nowIso() }, { silent: true });
+        result = await saveTask(null, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, contactId:contactId, notes:notes, done:false, createdAt: nowIso() }, { silent: true });
       }
       if (submitBtn) submitBtn.disabled = false;
       if (result.status === 'saved'){
@@ -3602,7 +3895,18 @@
   }
 
   // ---------- contacts ----------
+  // Live total of confirmed Contact records loaded from the server (records
+  // with _version). Independent of search/filters. A Contact still waiting
+  // for save confirmation isn't counted yet; a blocked delete never removes
+  // one (Contact delete is non-optimistic).
+  function renderContactsTotal(){
+    var elT = document.getElementById('contacts-total');
+    if (!elT) return;
+    var n = Object.keys(state.contacts).filter(function(k){ return state.contacts[k] && state.contacts[k]._version; }).length;
+    elT.textContent = 'Total Contacts: ' + n;
+  }
   function renderContacts(){
+    renderContactsTotal();
     var list = document.getElementById('contact-list');
     var term = state.contactSearch.trim().toLowerCase();
     var contacts = Object.keys(state.contacts).map(function(k){ return state.contacts[k]; });
@@ -3760,8 +4064,10 @@
       leadsGoal: Number(document.getElementById('goal-leads').value)||0,
       quotesGoal: Number(document.getElementById('goal-quotes').value)||0,
       closedGoal: Number(document.getElementById('goal-closed').value)||0,
-      revenueGoal: Number(document.getElementById('goal-revenue').value)||0,
-      updatedAt: nowIso()
+      revenueGoal: Number(document.getElementById('goal-revenue').value)||0
+      // updatedAt intentionally NOT sent (same fix as Contacts/Tasks):
+      // handleSaveGoal() stamps its own server time, so a client value never
+      // matched on verification and every Goal save read back "Not synced".
     });
   });
   document.getElementById('daily-targets-form').addEventListener('submit', async function(e){
@@ -3928,6 +4234,21 @@
     document.getElementById('yn-yes').addEventListener('click', function(){ closeModal(); if (onYes) onYes(); });
   }
 
+  // Save-button feedback for the Contact and Opportunity forms: while a save
+  // is being confirmed the button is disabled (as before) AND reads
+  // "Saving\u2026". On phones the sidebar "Saving\u2026" badge is hidden, so
+  // without this a multi-second confirmation looked like a hang.
+  function setSubmitBusy(btn, busy){
+    if (!btn) return;
+    if (busy){
+      if (!btn.hasAttribute('data-idle-label')) btn.setAttribute('data-idle-label', btn.textContent);
+      btn.disabled = true;
+      btn.textContent = 'Saving\u2026';
+    } else {
+      btn.disabled = false;
+      if (btn.hasAttribute('data-idle-label')){ btn.textContent = btn.getAttribute('data-idle-label'); btn.removeAttribute('data-idle-label'); }
+    }
+  }
   function openDealModal(dealId){
     state.openDealModalId = dealId || null;
     var editing = dealId ? state.deals[dealId] : null;
@@ -4195,10 +4516,10 @@
           }
           if (stage !== 'closed_lost') common.lostReason = '';
         }
-        if (submitBtn) submitBtn.disabled = true;
+        setSubmitBusy(submitBtn, true);
         setModalStatus(null, null);
         var result = await updateDeal(dealId, common, { silent: true });
-        if (submitBtn) submitBtn.disabled = false;
+        setSubmitBusy(submitBtn, false);
         if (result.status === 'saved' || result.status === 'queued'){
           closeModal();
         } else if (result.status === 'conflict'){
@@ -4220,10 +4541,10 @@
           var data = Object.assign({ contactId: contactId, contactName: contactName, createdAt: nowIso(),
             quoteSentAt: stage==='quote_sent' ? nowIso() : null,
             closedAt: (isRealized(stage)||stage==='closed_lost') ? nowIso() : null }, common);
-          if (submitBtn) submitBtn.disabled = true;
+          setSubmitBusy(submitBtn, true);
           setModalStatus(null, null);
           var result = await saveDeal(null, data, { silent: true });
-          if (submitBtn) submitBtn.disabled = false;
+          setSubmitBusy(submitBtn, false);
           if (result.status === 'saved'){
             closeModal();
           } else if (result.status === 'conflict'){
@@ -4275,10 +4596,10 @@
           // Contact changes must be confirmed BEFORE the Opportunity is saved,
           // using the same result contract as every other modal save:
           // 'saved' proceeds; 'conflict'/'failed' keep the modal open.
-          if (submitBtn) submitBtn.disabled = true;
+          setSubmitBusy(submitBtn, true);
           setModalStatus(null, null);
           var contactResult = await saveContact(existing.id, contactPatch, { silent: true });
-          if (submitBtn) submitBtn.disabled = false;
+          setSubmitBusy(submitBtn, false);
           if (contactResult.status === 'saved'){
             unconfirmedContactFields = null;
             proceedWithContactId(existing.id);
@@ -4325,10 +4646,10 @@
           // the backend can now refuse a duplicate create, and an
           // Opportunity must never be saved pointing at a Contact that was
           // never created.
-          if (submitBtn) submitBtn.disabled = true;
+          setSubmitBusy(submitBtn, true);
           setModalStatus(null, null);
           var newContactResult = await saveContact(newId, newContact, dealOverrideOption ? { silent: true, contactDuplicateOverride: dealOverrideOption } : { silent: true });
-          if (submitBtn) submitBtn.disabled = false;
+          setSubmitBusy(submitBtn, false);
           if (newContactResult.status === 'saved'){
             proceedWithContactId(newId);
           } else if (newContactResult.status === 'conflict'){
@@ -4463,10 +4784,10 @@
           return;
         }
       }
-      if (submitBtn) submitBtn.disabled = true;
+      setSubmitBusy(submitBtn, true);
       setModalStatus(null, null);
       var result = await saveContact(createId, data, overrideOption ? { silent: true, contactDuplicateOverride: overrideOption } : { silent: true });
-      if (submitBtn) submitBtn.disabled = false;
+      setSubmitBusy(submitBtn, false);
       if (result.status === 'saved'){
         closeModal();
       } else if (result.status === 'conflict'){
