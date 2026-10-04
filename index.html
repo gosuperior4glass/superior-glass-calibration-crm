@@ -868,6 +868,48 @@
   // not just a completed job or a follow-up touch.
   var REALIZED_STAGES = ['payment_received', 'customer_followup'];
   function stageInfo(id){ for (var i=0;i<STAGES.length;i++){ if (STAGES[i].id===id) return STAGES[i]; } return STAGES[0]; }
+  // ---------- shared revenue & quote definitions (Dashboard, Trends, Reports, exports) ----------
+  // REVENUE AMOUNT: the final invoice, or the quote amount when no final
+  // invoice was entered.
+  function revenueAmount(d){ var fi = Number(d && d.finalInvoice); return fi > 0 ? fi : (Number(d && d.quoteAmount) || 0); }
+  function parseDateOnlyLocal(s){ var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '')); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; }
+  // REVENUE DATE: revenue belongs to the day the money was received.
+  //  - AUTHORITATIVE: paymentReceivedDate (entered/confirmed by the user).
+  //  - LEGACY FALLBACK: closedAt (when the opportunity was moved into a paid
+  //    stage in the CRM) — only for paid records saved before
+  //    paymentReceivedDate existed. Never written back to the record.
+  // Only opportunities currently in a paid stage carry revenue, so a payment
+  // is counted at most once, on whatever its date is right now.
+  function revenueDateInfo(d){
+    if (!d || !isRealized(d.stage)) return null;
+    var pd = parseDateOnlyLocal(d.paymentReceivedDate);
+    if (pd) return { date: pd, source: 'payment' };
+    if (d.closedAt){ var cd = new Date(d.closedAt); if (!isNaN(cd.getTime())) return { date: cd, source: 'legacy' }; }
+    return null;
+  }
+  function revenueInRange(d, start, end){ var r = revenueDateInfo(d); return !!r && r.date.getTime() >= start.getTime() && r.date.getTime() < end.getTime(); }
+  // QUOTES: at most ONE quote credit per opportunity.
+  //  - EXPLICIT: quoteSentAt (stamped when the opportunity entered "Quote sent").
+  //  - INFERRED: no quoteSentAt, but the opportunity is in, or has a recorded
+  //    milestone of, a stage past "Quote sent" (Scheduled, Job completed,
+  //    Payment received, Customer follow-up). Dated by the EARLIEST recorded
+  //    downstream milestone — the latest date by which the quote must have
+  //    been issued. With no such milestone it is counted as a quote but left
+  //    undated (it can't be placed in a day/week/month).
+  var QUOTE_STAGE_ID = 'quote_sent';
+  var QUOTE_DOWNSTREAM_STAGES = ['scheduled', 'job_completed', 'payment_received', 'customer_followup'];
+  function quoteCredit(d){
+    if (!d) return null;
+    if (d.quoteSentAt){ var q = new Date(d.quoteSentAt); return { kind: 'explicit', date: isNaN(q.getTime()) ? null : q, evidence: 'quoteSentAt' }; }
+    var downstream = QUOTE_DOWNSTREAM_STAGES.indexOf(d.stage) !== -1 || !!d.scheduledAt || !!d.jobCompletedAt;
+    if (!downstream) return d.stage === QUOTE_STAGE_ID ? { kind: 'explicit', date: null, evidence: 'stage only (no quote date recorded)' } : null;
+    var cands = [['scheduledAt', d.scheduledAt ? new Date(d.scheduledAt) : null], ['jobCompletedAt', d.jobCompletedAt ? new Date(d.jobCompletedAt) : null]];
+    if (isRealized(d.stage)){ cands.push(['paymentReceivedDate', parseDateOnlyLocal(d.paymentReceivedDate)]); cands.push(['closedAt', d.closedAt ? new Date(d.closedAt) : null]); }
+    var best = null;
+    cands.forEach(function(c){ if (c[1] && !isNaN(c[1].getTime()) && (!best || c[1].getTime() < best[1].getTime())) best = c; });
+    return { kind: 'inferred', date: best ? best[1] : null, evidence: best ? best[0] : 'none recorded' };
+  }
+  function quoteInRange(d, start, end){ var q = quoteCredit(d); return !!(q && q.date && q.date.getTime() >= start.getTime() && q.date.getTime() < end.getTime()); }
   function isRealized(stage){ return REALIZED_STAGES.indexOf(stage) !== -1; }
 
   var SOURCES = ['BNI','Chamber of Commerce','Door knocking','Event / fair','Fleet / commercial partner','Google / search','Insurance referral','Repeat customer','Word of mouth','Business Card/Flyer','Website','Other'];
@@ -2129,7 +2171,7 @@
     return {
       newContacts: contacts.filter(function(c){ return inRange(c.createdAt, dayStart, dayEnd); }).length,
       followups: followups.filter(function(f){ return inRange(f.loggedAt, dayStart, dayEnd); }).length,
-      quotesSent: deals.filter(function(d){ return inRange(d.quoteSentAt, dayStart, dayEnd); }).length,
+      quotesSent: deals.filter(function(d){ return quoteInRange(d, dayStart, dayEnd); }).length,
       jobsScheduled: deals.filter(function(d){ return inRange(d.scheduledAt, dayStart, dayEnd); }).length
     };
   }
@@ -2139,17 +2181,15 @@
     var wb = wbArg || weekBounds();
     var contacts = Object.keys(state.contacts).map(function(k){ return state.contacts[k]; });
     var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
-    // Revenue: same field (quoteAmount) and same event (closedAt, isRealized)
-    // already used by this Dashboard's own Monthly revenue card just below —
-    // deliberately NOT the finalInvoice-based definition Reports uses, to
-    // stay consistent with the Monthly card this section sits beside.
-    var closedWon = deals.filter(function(d){ return isRealized(d.stage) && inRange(d.closedAt, wb.start, wb.end); });
+    // Revenue and quotes use the shared definitions (revenueAmount /
+    // revenueInRange / quoteInRange) also used by Monthly, Trends and Reports.
+    var paidInWeek = deals.filter(function(d){ return revenueInRange(d, wb.start, wb.end); });
     return {
       newContacts: contacts.filter(function(c){ return inRange(c.createdAt, wb.start, wb.end); }).length,
-      quotesSent: deals.filter(function(d){ return inRange(d.quoteSentAt, wb.start, wb.end); }).length,
+      quotesSent: deals.filter(function(d){ return quoteInRange(d, wb.start, wb.end); }).length,
       jobsScheduled: deals.filter(function(d){ return inRange(d.scheduledAt, wb.start, wb.end); }).length,
       jobsCompleted: deals.filter(function(d){ return inRange(d.jobCompletedAt, wb.start, wb.end); }).length,
-      revenue: closedWon.reduce(function(s,d){ return s + (Number(d.quoteAmount)||0); }, 0)
+      revenue: paidInWeek.reduce(function(s,d){ return s + revenueAmount(d); }, 0)
     };
   }
   // Daily status is straight achievement against the full daily target —
@@ -2257,8 +2297,8 @@
     // Monthly pace — always the REAL current month, independent of
     // whatever month the Monthly section below might be navigated to.
     var monthRevenue = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }))
-      .filter(function(d){ return isRealized(d.stage) && inRange(d.closedAt, monthBounds.start, monthBounds.end); })
-      .reduce(function(s,d){ return s + (Number(d.quoteAmount)||0); }, 0);
+      .filter(function(d){ return revenueInRange(d, monthBounds.start, monthBounds.end); })
+      .reduce(function(s,d){ return s + revenueAmount(d); }, 0);
     var daysElapsed = Math.max(1, Math.min(totalDaysInMonth, new Date().getDate()));
     var expectedByToday = (monthlyGoals.revenueGoal||0) * (daysElapsed / totalDaysInMonth);
     var paceStat = computeMonthlyStatus(monthKey, monthRevenue, monthlyGoals.revenueGoal);
@@ -2386,10 +2426,13 @@
     if (state.sourceFilter !== 'all') basisNote.textContent += ' Showing "'+state.sourceFilter+'" only.';
 
     var newOppsDeals = deals.filter(function(d){ return inRange(d.createdAt, bounds.start, bounds.end); });
-    var quotesSentDeals = deals.filter(function(d){ return inRange(d.quoteSentAt, bounds.start, bounds.end); });
+    var quotesSentDeals = deals.filter(function(d){ return quoteInRange(d, bounds.start, bounds.end); });
+    // "Jobs completed" / win rate keep their established basis (closedAt);
+    // revenue is credited on the payment date (shared definition).
     var closedWonDeals = deals.filter(function(d){ return isRealized(d.stage) && inRange(d.closedAt, bounds.start, bounds.end); });
     var closedLostDeals = deals.filter(function(d){ return d.stage==='closed_lost' && inRange(d.closedAt, bounds.start, bounds.end); });
-    var revenue = closedWonDeals.reduce(function(s,d){ return s + (Number(d.quoteAmount)||0); }, 0);
+    var paidDeals = deals.filter(function(d){ return revenueInRange(d, bounds.start, bounds.end); });
+    var revenue = paidDeals.reduce(function(s,d){ return s + revenueAmount(d); }, 0);
 
     var kpis = [
       { label:'New opportunities', actual:newOppsDeals.length, goal:goals.leadsGoal, fmt:function(n){return n;}, color:'var(--color-opportunity)' },
@@ -2460,7 +2503,7 @@
           : 'Month closed: red under 70% of the full-month goal, yellow 70\u201399%, green 100%+.'));
     }
 
-    var avgJobValue = closedWonDeals.length ? (revenue / closedWonDeals.length) : 0;
+    var avgJobValue = paidDeals.length ? (revenue / paidDeals.length) : 0;
     var winRateBase = closedWonDeals.length + closedLostDeals.length;
     var winRate = winRateBase ? Math.round((closedWonDeals.length / winRateBase) * 100) : null;
     var statRow = document.getElementById('stat-row');
@@ -2523,9 +2566,9 @@
       var rows = teamNames.map(function(name){
         var mine = deals.filter(function(d){ return d.assignedTo === name; });
         var mineNew = mine.filter(function(d){ return inRange(d.createdAt, bounds.start, bounds.end); }).length;
-        var mineQuotes = mine.filter(function(d){ return inRange(d.quoteSentAt, bounds.start, bounds.end); }).length;
+        var mineQuotes = mine.filter(function(d){ return quoteInRange(d, bounds.start, bounds.end); }).length;
         var mineClosed = mine.filter(function(d){ return isRealized(d.stage) && inRange(d.closedAt, bounds.start, bounds.end); });
-        var mineRev = mineClosed.reduce(function(s,d){ return s+(Number(d.quoteAmount)||0); }, 0);
+        var mineRev = mine.filter(function(d){ return revenueInRange(d, bounds.start, bounds.end); }).reduce(function(s,d){ return s + revenueAmount(d); }, 0);
         return '<tr><td>'+esc(name)+'</td><td>'+mineNew+'</td><td>'+mineQuotes+'</td><td>'+mineClosed.length+'</td><td>'+fmtMoneyPrecise(mineRev)+'</td></tr>';
       }).join('');
       teamWrap.innerHTML = '<div class="table-scroll"><table class="team-table"><thead><tr><th>Team member</th><th>New</th><th>Quoted</th><th>Closed</th><th>Revenue</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
@@ -2579,9 +2622,9 @@
     var deals = Object.keys(state.deals).map(function(k){ return state.deals[k]; });
     var goals = getEffectiveGoals(bounds.key) || { leadsGoal:0, quotesGoal:0, closedGoal:0, revenueGoal:0 };
     var newOpps = deals.filter(function(d){ return inRange(d.createdAt, bounds.start, bounds.end); });
-    var quotesSent = deals.filter(function(d){ return inRange(d.quoteSentAt, bounds.start, bounds.end); });
+    var quotesSent = deals.filter(function(d){ return quoteInRange(d, bounds.start, bounds.end); });
     var closedWon = deals.filter(function(d){ return isRealized(d.stage) && inRange(d.closedAt, bounds.start, bounds.end); });
-    var revenue = closedWon.reduce(function(s,d){ return s+(Number(d.quoteAmount)||0); }, 0);
+    var revenue = deals.filter(function(d){ return revenueInRange(d, bounds.start, bounds.end); }).reduce(function(s,d){ return s + revenueAmount(d); }, 0);
     var monthDeals = deals.filter(function(d){ return inRange(d.createdAt, bounds.start, bounds.end); });
 
     var lines = [];
@@ -2706,11 +2749,17 @@
         // "Fully Paid" step are what determine payment status.
       }
       // else: already realized (e.g. Payment Received -> Customer Follow-Up) — keep the original closedAt and payment info
+      // Payment received date defaults to today when an opportunity is first
+      // marked paid from the Pipeline (no form to ask in); it can be
+      // corrected later in the opportunity's Billing & payment section.
+      if (!isRealized(oldStage) && !(deal && deal.paymentReceivedDate)) patch.paymentReceivedDate = localDateKey();
     } else if (newStage === 'closed_lost'){
       patch.closedAt = nowIso();
     } else {
       patch.closedAt = null;
     }
+    // Leaving the paid stages removes the payment date (and so the revenue).
+    if (!isRealized(newStage) && deal && deal.paymentReceivedDate) patch.paymentReceivedDate = '';
     if (newStage !== 'closed_lost') patch.lostReason = '';
     return patch;
   }
@@ -2856,11 +2905,12 @@
       var b = boundsFromKey(key);
       var goals = getEffectiveGoals(key) || {};
       var newOpps = deals.filter(function(d){ return inRange(d.createdAt, b.start, b.end); }).length;
-      var quotesSent = deals.filter(function(d){ return inRange(d.quoteSentAt, b.start, b.end); }).length;
+      var quotesSent = deals.filter(function(d){ return quoteInRange(d, b.start, b.end); }).length;
       var closedWon = deals.filter(function(d){ return isRealized(d.stage) && inRange(d.closedAt, b.start, b.end); });
       var closedLost = deals.filter(function(d){ return d.stage==='closed_lost' && inRange(d.closedAt, b.start, b.end); });
-      var revenue = closedWon.reduce(function(s,d){ return s + (Number(d.quoteAmount)||0); }, 0);
-      var avgJobValue = closedWon.length ? (revenue / closedWon.length) : 0;
+      var paidInMonth = deals.filter(function(d){ return revenueInRange(d, b.start, b.end); });
+      var revenue = paidInMonth.reduce(function(s,d){ return s + revenueAmount(d); }, 0);
+      var avgJobValue = paidInMonth.length ? (revenue / paidInMonth.length) : 0;
       var winBase = closedWon.length + closedLost.length;
       var winRate = winBase ? Math.round((closedWon.length / winBase) * 100) : 0;
       var label = b.start.toLocaleDateString('en-US', b.start.getFullYear()===thisYear ? { month:'short' } : { month:'short', year:'2-digit' });
@@ -3158,16 +3208,20 @@
     var cohort = allDeals.filter(function(d){ return inReportRange(range, d.createdAt); });
     var won = allDeals.filter(function(d){ return isRealized(d.stage) && inReportRange(range, d.closedAt); });
     var lost = allDeals.filter(function(d){ return d.stage === 'closed_lost' && inReportRange(range, d.closedAt); });
+    // Revenue set: paid opportunities whose PAYMENT date (shared definition,
+    // revenueDateInfo) falls in the range — the same rule as the Dashboard.
+    // Jobs won / win rate / outstanding keep their established closedAt basis.
+    var paid = allDeals.filter(function(d){ var r = revenueDateInfo(d); return !!r && (range.start ? (r.date.getTime() >= range.start.getTime() && r.date.getTime() < range.end.getTime()) : true); });
 
     var quotedValue = cohort.reduce(function(s,d){ return s+(Number(d.quoteAmount)||0); }, 0);
-    var finalInvoiced = won.reduce(function(s,d){ return s + (Number(d.finalInvoice)>0 ? Number(d.finalInvoice) : 0); }, 0);
-    var collected = won.reduce(function(s,d){ return s + (Number(d.amountPaid)||0); }, 0);
+    var finalInvoiced = paid.reduce(function(s,d){ return s + revenueAmount(d); }, 0);
+    var collected = paid.reduce(function(s,d){ return s + (Number(d.amountPaid)||0); }, 0);
     var outstandingInPeriod = won.reduce(function(s,d){ var fi=Number(d.finalInvoice)||0, ap=Number(d.amountPaid)||0; return s+(fi>ap?(fi-ap):0); }, 0);
     var winRatePct = (won.length+lost.length) ? Math.round(won.length/(won.length+lost.length)*100) : null;
 
     var funnel = {
       opps: cohort.length,
-      quotes: cohort.filter(function(d){ return !!d.quoteSentAt; }).length,
+      quotes: cohort.filter(function(d){ return !!quoteCredit(d); }).length, // explicit or inferred, max one per opportunity
       // scheduledAt is the "reached Scheduled" milestone timestamp — set
       // once, preserved if the deal moves forward, cleared only if moved
       // backward before Scheduled. This is the correct field for a
@@ -3190,17 +3244,20 @@
     JOB_TYPES.forEach(function(jt){ byType[jt.id] = { label: jt.label, total:0, won:0, revenue:0 }; });
     byType.__none = { label:'Not set', total:0, won:0, revenue:0 };
     cohort.forEach(function(d){ var k = (d.jobType && byType[d.jobType]) ? d.jobType : '__none'; byType[k].total++; });
-    won.forEach(function(d){ var k = (d.jobType && byType[d.jobType]) ? d.jobType : '__none'; byType[k].won++; byType[k].revenue += Number(d.finalInvoice||d.quoteAmount||0); });
+    won.forEach(function(d){ var k = (d.jobType && byType[d.jobType]) ? d.jobType : '__none'; byType[k].won++; });
+    paid.forEach(function(d){ var k = (d.jobType && byType[d.jobType]) ? d.jobType : '__none'; byType[k].revenue += revenueAmount(d); });
 
     function bump(map, key){ if (!map[key]) map[key] = { total:0, won:0, lost:0, revenue:0, quoted:0 }; return map[key]; }
     var bySource = {};
     cohort.forEach(function(d){ var b = bump(bySource, d.source || 'Not set'); b.total++; b.quoted += Number(d.quoteAmount)||0; });
-    won.forEach(function(d){ var b = bump(bySource, d.source || 'Not set'); b.won++; b.revenue += Number(d.finalInvoice||d.quoteAmount||0); });
+    won.forEach(function(d){ var b = bump(bySource, d.source || 'Not set'); b.won++; });
+    paid.forEach(function(d){ bump(bySource, d.source || 'Not set').revenue += revenueAmount(d); });
     lost.forEach(function(d){ var b = bump(bySource, d.source || 'Not set'); b.lost++; });
 
     var byCreator = {};
     cohort.forEach(function(d){ var b = bump(byCreator, d.createdBy || 'Not set'); b.total++; b.quoted += Number(d.quoteAmount)||0; });
-    won.forEach(function(d){ var b = bump(byCreator, d.createdBy || 'Not set'); b.won++; b.revenue += Number(d.finalInvoice||d.quoteAmount||0); });
+    won.forEach(function(d){ var b = bump(byCreator, d.createdBy || 'Not set'); b.won++; });
+    paid.forEach(function(d){ bump(byCreator, d.createdBy || 'Not set').revenue += revenueAmount(d); });
     lost.forEach(function(d){ var b = bump(byCreator, d.createdBy || 'Not set'); b.lost++; });
 
     var outstandingDeals = allDeals.filter(function(d){ var fi=Number(d.finalInvoice)||0, ap=Number(d.amountPaid)||0; return fi>0 && fi>ap; })
@@ -3212,10 +3269,11 @@
     function mixKey(d){ var c = state.contacts[d.contactId]; return (c && c.accountType==='fleet') ? 'fleet' : 'individual'; }
     var mix = { individual: { label:'Individual', total:0, won:0, revenue:0 }, fleet: { label:'Fleet / commercial', total:0, won:0, revenue:0 } };
     cohort.forEach(function(d){ mix[mixKey(d)].total++; });
-    won.forEach(function(d){ var k = mixKey(d); mix[k].won++; mix[k].revenue += Number(d.finalInvoice||d.quoteAmount||0); });
+    won.forEach(function(d){ var k = mixKey(d); mix[k].won++; });
+    paid.forEach(function(d){ mix[mixKey(d)].revenue += revenueAmount(d); });
 
     return {
-      range:range, cohort:cohort, won:won, lost:lost,
+      range:range, cohort:cohort, won:won, lost:lost, paid:paid,
       quotedValue:quotedValue, finalInvoiced:finalInvoiced, collected:collected, outstandingInPeriod:outstandingInPeriod, winRatePct:winRatePct,
       funnel:funnel, byType:byType, bySource:bySource, byCreator:byCreator, outstandingDeals:outstandingDeals, lostByReason:lostByReason, mix:mix
     };
@@ -3228,14 +3286,14 @@
 
     var data = computeReportData();
     var range = data.range;
-    document.getElementById('reports-scope-note').textContent = 'Showing: ' + range.label + '. Opportunity/team/service/customer counts use each job\u2019s logged date; Won, Lost, and Revenue use the date it closed.';
+    document.getElementById('reports-scope-note').textContent = 'Showing: ' + range.label + '. Opportunity/team/service/customer counts use each job\u2019s logged date; Won and Lost use the date it closed; Revenue and Paid use the date payment was received.';
     document.getElementById('reports-source-label').textContent = 'By referral source \u2014 ' + range.label;
     document.getElementById('reports-lost-label').textContent = 'Why opportunities were lost \u2014 ' + range.label;
 
     document.getElementById('reports-stats').innerHTML = [
       ['Quoted value', fmtMoneyPrecise(data.quotedValue), 'Opportunities logged in period'],
-      ['Final invoiced', fmtMoneyPrecise(data.finalInvoiced), 'Jobs closed in period'],
-      ['Paid to date', fmtMoneyPrecise(data.collected), 'Jobs closed in selected period'],
+      ['Revenue', fmtMoneyPrecise(data.finalInvoiced), 'Final invoice (or quote), paid in period'],
+      ['Paid to date', fmtMoneyPrecise(data.collected), 'Amount paid on jobs paid in period'],
       ['Outstanding', fmtMoneyPrecise(data.outstandingInPeriod), 'Invoiced & unpaid, closed in period'],
       ['Jobs won', data.won.length, 'Closed in period'],
       ['Win rate', data.winRatePct===null ? '\u2014' : data.winRatePct+'%', 'Closed in period']
@@ -3350,8 +3408,8 @@
     lines.push(csvEscape('Superior Glass and Calibration - Report - ' + data.range.label));
     lines.push('');
     lines.push(['Quoted value', data.quotedValue.toFixed(2)].map(csvEscape).join(','));
-    lines.push(['Final invoiced', data.finalInvoiced.toFixed(2)].map(csvEscape).join(','));
-    lines.push(['Paid to date (jobs closed in period)', data.collected.toFixed(2)].map(csvEscape).join(','));
+    lines.push(['Revenue (final invoice or quote; by payment received date)', data.finalInvoiced.toFixed(2)].map(csvEscape).join(','));
+    lines.push(['Paid to date (jobs paid in period)', data.collected.toFixed(2)].map(csvEscape).join(','));
     lines.push(['Outstanding (closed in period)', data.outstandingInPeriod.toFixed(2)].map(csvEscape).join(','));
     lines.push(['Jobs won', data.won.length].map(csvEscape).join(','));
     lines.push(['Win rate', data.winRatePct===null?'N/A':data.winRatePct+'%'].map(csvEscape).join(','));
@@ -4320,6 +4378,12 @@
           '<details class="form-section"><summary>Billing &amp; payment</summary><div class="form-grid">' +
             '<div class="form-field"><label for="dm-finalinvoice">Final invoice ($)</label><input id="dm-finalinvoice" type="number" min="0" step="0.01" placeholder="Defaults to quote amount" value="'+(editing && editing.finalInvoice ? editing.finalInvoice : '')+'"></div>' +
             '<div class="form-field"><label for="dm-amountpaid">Amount paid ($)</label><input id="dm-amountpaid" type="number" min="0" step="0.01" value="'+(editing && editing.amountPaid ? editing.amountPaid : '')+'"></div>' +
+            // Payment received date: the day the money actually arrived.
+            // Revenue is credited to this date. Required (and defaulted to
+            // today) when the opportunity is in Payment received / Customer
+            // follow-up; can't be in the future.
+            '<div class="form-field"><label for="dm-paymentdate">Payment received date</label><input id="dm-paymentdate" type="date" max="'+localDateKey()+'" value="'+esc(editing ? (editing.paymentReceivedDate||'') : '')+'"></div>' +
+            ((editing && isRealized(editing.stage) && !editing.paymentReceivedDate) ? '<div class="form-field full" id="dm-paymentdate-legacy" style="font-size:12px;color:var(--color-text-muted);margin-top:-6px;">Payment date not recorded. Revenue is currently credited to the date this was marked paid in the CRM'+(editing.closedAt ? ' ('+esc(new Date(editing.closedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}))+')' : '')+'. Enter the actual date to correct it.</div>' : '') +
             (editing ? '<div class="form-field full" style="font-size:12.5px;color:var(--color-text-muted);">Balance due: <strong style="color:var(--color-text);">'+fmtMoneyPrecise(Math.max(0, Number(editing.finalInvoice||editing.quoteAmount||0) - Number(editing.amountPaid||0)))+'</strong></div>' : '') +
           '</div></details>' +
           '<details class="form-section"><summary>Photos &amp; documents</summary>' +
@@ -4352,6 +4416,22 @@
 
     backdrop.hidden = false;
     document.getElementById('dm-close').addEventListener('click', closeModal);
+    (function(){
+      var stSel = document.getElementById('dm-stage'), pay = document.getElementById('dm-paymentdate');
+      if (!stSel || !pay) return;
+      stSel.addEventListener('change', function(){
+        if (isRealized(stSel.value) && !pay.value){
+          pay.value = localDateKey();
+          var det = pay.closest('details'); if (det) det.open = true;
+        }
+      });
+      // The browser's own date limit (max = today) can stop the save before
+      // the CRM's check runs — show the same clear message and reveal the field.
+      pay.addEventListener('invalid', function(){
+        var det = pay.closest('details'); if (det) det.open = true;
+        setModalStatus('failed', 'The payment received date can\u2019t be in the future. Enter the date the money was actually received.');
+      });
+    })();
     document.getElementById('dm-cancel').addEventListener('click', closeModal);
     // Duplicate-prevention state for the NEW-opportunity path only.
     // pinnedContactId: a specific Contact the user picked from the
@@ -4477,11 +4557,27 @@
       var insuranceAuthorized = document.getElementById('dm-ins-auth').value;
       var finalInvoiceRaw = document.getElementById('dm-finalinvoice').value;
       var amountPaidRaw = document.getElementById('dm-amountpaid').value;
+      var payDateRaw = (document.getElementById('dm-paymentdate') || { value:'' }).value;
       var attachmentLinks = document.getElementById('dm-attachments').value.trim();
       var notes = document.getElementById('dm-notes').value.trim();
 
       var common = { title:title, vehicle:vehicle, licensePlate:licensePlate, quoteAmount: amount ? Number(amount) : null, jobType:jobType, calibrationType:calibrationType, stage:stage, source:source, assignedTo:assignedTo, scheduledDate:scheduledDate, scheduledTime:scheduledTime, partsStatus:partsStatus, lostReason:lostReason, insuranceCarrier:insuranceCarrier, claimNumber:claimNumber, adjusterName:adjusterName, adjusterPhone:adjusterPhone, insuranceAuthorized:insuranceAuthorized, finalInvoice: finalInvoiceRaw ? Number(finalInvoiceRaw) : null, amountPaid: amountPaidRaw ? Number(amountPaidRaw) : 0, attachmentLinks:attachmentLinks, notes:notes, updatedAt: nowIso() };
 
+      // Payment received date rules (see the Billing & payment field).
+      if (isRealized(stage)){
+        var hadPayDate = !!(editing && editing.paymentReceivedDate);
+        var newlyPaid = !editing || !isRealized(editing.stage);
+        if (payDateRaw && payDateRaw > localDateKey()){
+          var detF = document.getElementById('dm-paymentdate').closest('details'); if (detF) detF.open = true;
+          setModalStatus('failed', 'The payment received date can\u2019t be in the future. Enter the date the money was actually received.');
+          return;
+        }
+        if (!payDateRaw && (newlyPaid || hadPayDate)){
+          var detB = document.getElementById('dm-paymentdate').closest('details'); if (detB) detB.open = true;
+          setModalStatus('failed', 'Enter the payment received date (Billing & payment) \u2014 revenue is credited to that date.');
+          return;
+        }
+      }
       if (editing){
         if (editing.stage !== stage){
           if (stage === 'quote_sent'){
@@ -4516,6 +4612,12 @@
           }
           if (stage !== 'closed_lost') common.lostReason = '';
         }
+        // Payment date: set/corrected while paid; removed when no longer paid.
+        if (isRealized(stage)){
+          if (payDateRaw && payDateRaw !== (editing.paymentReceivedDate || '')) common.paymentReceivedDate = payDateRaw;
+        } else if (editing.paymentReceivedDate){
+          common.paymentReceivedDate = '';
+        }
         setSubmitBusy(submitBtn, true);
         setModalStatus(null, null);
         var result = await updateDeal(dealId, common, { silent: true });
@@ -4541,6 +4643,16 @@
           var data = Object.assign({ contactId: contactId, contactName: contactName, createdAt: nowIso(),
             quoteSentAt: stage==='quote_sent' ? nowIso() : null,
             closedAt: (isRealized(stage)||stage==='closed_lost') ? nowIso() : null }, common);
+          if (isRealized(stage)) data.paymentReceivedDate = payDateRaw;
+          // Milestone stamps for an opportunity CREATED directly in a later
+          // stage — the same rule a stage change applies (stageTransitionPatch
+          // and the edit path): scheduledAt only when entering Scheduled,
+          // jobCompletedAt only when entering Job completed. A stage that was
+          // skipped is never stamped (creating at Job completed does not also
+          // stamp scheduledAt). Paid stages already get closedAt +
+          // paymentReceivedDate above, unchanged.
+          if (stage === 'scheduled') data.scheduledAt = data.createdAt;
+          if (stage === 'job_completed') data.jobCompletedAt = data.createdAt;
           setSubmitBusy(submitBtn, true);
           setModalStatus(null, null);
           var result = await saveDeal(null, data, { silent: true });
