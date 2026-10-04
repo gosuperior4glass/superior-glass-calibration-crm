@@ -292,6 +292,12 @@
   .deal-list-mini .dlm-row { display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--color-border); font-size:12.5px; gap:8px; }
   .deal-list-mini .dlm-row:last-child { border-bottom:none; }
   details.form-section { border:1px solid var(--color-border); border-radius:9px; padding:2px 14px 10px; margin: 4px 0 14px; grid-column: 1/-1; }
+  /* Month/Day/Year menus that mirror a date field on phones (see attachDateMenus). */
+  .date-menus { display:none; }
+  @media (max-width: 860px) {
+    .date-menus { display:flex; gap:6px; margin-top:6px; }
+    .date-menus select { flex:1 1 0; width:auto !important; min-width:0; }
+  }
   details.form-section summary { padding:10px 0 6px; font-size:12.5px; font-weight:700; cursor:pointer; color: var(--color-text-muted); }
   .attach-links { margin-top:8px; }
   .attach-links a { display:block; font-size:12.5px; color: var(--color-accent-2); word-break:break-all; margin-bottom:3px; }
@@ -4296,6 +4302,58 @@
   // is being confirmed the button is disabled (as before) AND reads
   // "Saving\u2026". On phones the sidebar "Saving\u2026" badge is hidden, so
   // without this a multi-second confirmation looked like a hang.
+  // ---------- reliable date entry on phones ----------
+  // Some Android installs focus an <input type="date"> on tap without opening
+  // the calendar. (1) On touch devices, a tap explicitly asks the browser to
+  // open its native picker (showPicker; ignored where unsupported). (2)
+  // attachDateMenus adds Month/Day/Year menus under a date field on phone
+  // widths; they only WRITE the same YYYY-MM-DD value into that field (and
+  // follow it when it changes), so every existing rule on the field (default,
+  // max/future check, required check, save) is unchanged.
+  document.addEventListener('click', function(e){
+    var t = e.target;
+    if (!t || t.tagName !== 'INPUT' || t.type !== 'date' || t.disabled || t.readOnly) return;
+    if (!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches)) return;
+    try { if (typeof t.showPicker === 'function') t.showPicker(); } catch (err) { /* menus remain available */ }
+  });
+  // opts (optional): { yearsAhead, yearsBack } for the Year menu; defaults
+  // (0 ahead, 3 back) are the Payment received date's original range.
+  function attachDateMenus(input, wrap, opts){
+    if (!input || !wrap) return;
+    var yearsAhead = (opts && opts.yearsAhead) || 0, yearsBack = (opts && opts.yearsBack != null) ? opts.yearsBack : 3;
+    var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var thisYear = new Date().getFullYear();
+    function pad(n){ return String(n).padStart(2, '0'); }
+    function buildYears(extraYear){
+      var ys = []; for (var y = thisYear + yearsAhead; y >= thisYear - yearsBack; y--) ys.push(y);
+      if (extraYear && ys.indexOf(extraYear) === -1) ys.push(extraYear);
+      return '<option value="">Year</option>' + ys.map(function(y){ return '<option value="'+y+'">'+y+'</option>'; }).join('');
+    }
+    wrap.innerHTML =
+      '<select data-part="m" aria-label="Month"><option value="">Month</option>' + MONTHS.map(function(m, i){ return '<option value="'+pad(i+1)+'">'+m+'</option>'; }).join('') + '</select>' +
+      '<select data-part="d" aria-label="Day"><option value="">Day</option>' + Array.apply(null, Array(31)).map(function(_, i){ return '<option value="'+pad(i+1)+'">'+(i+1)+'</option>'; }).join('') + '</select>' +
+      '<select data-part="y" aria-label="Year">' + buildYears() + '</select>';
+    var mSel = wrap.querySelector('[data-part="m"]'), dSel = wrap.querySelector('[data-part="d"]'), ySel = wrap.querySelector('[data-part="y"]');
+    function sync(){
+      var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.value || '');
+      if (m && !ySel.querySelector('option[value="'+m[1]+'"]')) ySel.innerHTML = buildYears(+m[1]);
+      ySel.value = m ? m[1] : ''; mSel.value = m ? m[2] : ''; dSel.value = m ? m[3] : '';
+    }
+    function write(){
+      if (!ySel.value || !mSel.value || !dSel.value) return; // incomplete: leave the field as it is
+      var y = +ySel.value, mo = +mSel.value, d = +dSel.value;
+      var last = new Date(y, mo, 0).getDate();
+      if (d > last){ d = last; dSel.value = pad(d); }
+      input.value = y + '-' + pad(mo) + '-' + pad(d);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    [mSel, dSel, ySel].forEach(function(sel){ sel.addEventListener('change', write); });
+    input.addEventListener('input', sync);
+    input.addEventListener('change', sync);
+    input._syncDateMenus = sync;
+    sync();
+  }
   function setSubmitBusy(btn, busy){
     if (!btn) return;
     if (busy){
@@ -4364,7 +4422,7 @@
           '<div class="form-field"><label for="dm-stage">Stage</label><select id="dm-stage">'+STAGES.map(function(s){ return '<option value="'+s.id+'"'+(editing && editing.stage===s.id ? ' selected' : '')+'>'+esc(s.label)+'</option>'; }).join('')+'</select></div>' +
           '<div class="form-field"><label for="dm-source">Referral source</label><select id="dm-source"><option value="">Not set</option>'+SOURCES.map(function(s){ return '<option value="'+esc(s)+'"'+(editing && editing.source===s ? ' selected':'')+'>'+esc(s)+'</option>'; }).join('')+'</select></div>' +
           '<div class="form-field"><label for="dm-assigned">Assigned to</label><input id="dm-assigned" value="'+esc(editing ? editing.assignedTo : '')+'"></div>' +
-          '<div class="form-field"><label for="dm-scheduled">Scheduled date</label><input id="dm-scheduled" type="date" value="'+esc(editing ? editing.scheduledDate : '')+'"></div>' +
+          '<div class="form-field"><label for="dm-scheduled">Scheduled date</label><input id="dm-scheduled" type="date" value="'+esc(editing ? editing.scheduledDate : '')+'"><div class="date-menus" id="dm-scheduled-menus"></div></div>' +
           '<div class="form-field"><label for="dm-scheduledtime">Appointment time</label><input id="dm-scheduledtime" type="time" value="'+esc(editing ? editing.scheduledTime : '')+'"></div>' +
           '<div class="form-field"><label for="dm-parts">Parts status</label><select id="dm-parts">'+PARTS_STATUSES.map(function(p){ return '<option value="'+esc(p)+'"'+(editing && editing.partsStatus===p ? ' selected':'')+'>'+esc(p)+'</option>'; }).join('')+'</select></div>' +
           (editing && editing.stage === 'closed_lost' ? '<div class="form-field"><label for="dm-lostreason">Lost reason</label><select id="dm-lostreason"><option value="">Not set</option>'+LOST_REASONS.map(function(r){ return '<option value="'+esc(r)+'"'+(editing.lostReason===r?' selected':'')+'>'+esc(r)+'</option>'; }).join('')+'</select></div>' : '') +
@@ -4382,7 +4440,7 @@
             // Revenue is credited to this date. Required (and defaulted to
             // today) when the opportunity is in Payment received / Customer
             // follow-up; can't be in the future.
-            '<div class="form-field"><label for="dm-paymentdate">Payment received date</label><input id="dm-paymentdate" type="date" max="'+localDateKey()+'" value="'+esc(editing ? (editing.paymentReceivedDate||'') : '')+'"></div>' +
+            '<div class="form-field"><label for="dm-paymentdate">Payment received date</label><input id="dm-paymentdate" type="date" max="'+localDateKey()+'" value="'+esc(editing ? (editing.paymentReceivedDate||'') : '')+'"><div class="date-menus" id="dm-paymentdate-menus"></div></div>' +
             ((editing && isRealized(editing.stage) && !editing.paymentReceivedDate) ? '<div class="form-field full" id="dm-paymentdate-legacy" style="font-size:12px;color:var(--color-text-muted);margin-top:-6px;">Payment date not recorded. Revenue is currently credited to the date this was marked paid in the CRM'+(editing.closedAt ? ' ('+esc(new Date(editing.closedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}))+')' : '')+'. Enter the actual date to correct it.</div>' : '') +
             (editing ? '<div class="form-field full" style="font-size:12.5px;color:var(--color-text-muted);">Balance due: <strong style="color:var(--color-text);">'+fmtMoneyPrecise(Math.max(0, Number(editing.finalInvoice||editing.quoteAmount||0) - Number(editing.amountPaid||0)))+'</strong></div>' : '') +
           '</div></details>' +
@@ -4416,12 +4474,15 @@
 
     backdrop.hidden = false;
     document.getElementById('dm-close').addEventListener('click', closeModal);
+    attachDateMenus(document.getElementById('dm-scheduled'), document.getElementById('dm-scheduled-menus'), { yearsAhead: 2, yearsBack: 1 });
     (function(){
       var stSel = document.getElementById('dm-stage'), pay = document.getElementById('dm-paymentdate');
       if (!stSel || !pay) return;
+      attachDateMenus(pay, document.getElementById('dm-paymentdate-menus'));
       stSel.addEventListener('change', function(){
         if (isRealized(stSel.value) && !pay.value){
           pay.value = localDateKey();
+          if (pay._syncDateMenus) pay._syncDateMenus();
           var det = pay.closest('details'); if (det) det.open = true;
         }
       });
