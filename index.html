@@ -298,6 +298,33 @@
     .date-menus { display:flex; gap:6px; margin-top:6px; }
     .date-menus select { flex:1 1 0; width:auto !important; min-width:0; }
   }
+  /* Payments ledger (Billing & payment section) */
+  .pay-box { border:1px solid var(--color-border); border-radius:9px; padding:10px 12px; margin:4px 0 10px; font-size:13px; background: var(--color-surface-2); }
+  .pay-box.est { border-style:dashed; background:transparent; color: var(--color-text-muted); }
+  .pay-box .pb-row { display:flex; justify-content:space-between; gap:10px; padding:2px 0; }
+  .pay-box .pb-row strong { color: var(--color-text); }
+  .pay-box .pb-status { margin-top:4px; font-weight:700; }
+  .pay-box .pb-note { margin-top:6px; font-size:11.5px; color: var(--color-text-muted); }
+  .pay-hist-head { display:flex; justify-content:space-between; align-items:center; font-size:11.5px; font-weight:700; color: var(--color-text-muted); margin:8px 0 2px; }
+  .pay-row { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid var(--color-border); font-size:12.5px; cursor:pointer; }
+  .pay-row:last-child { border-bottom:none; }
+  .pay-row .pr-main { flex:1; min-width:0; overflow-wrap:anywhere; }
+  .pay-row .pr-sub { font-size:11.5px; color: var(--color-text-muted); }
+  .pay-row .pr-amt { font-weight:700; white-space:nowrap; }
+  .pay-row.refund .pr-amt { color: var(--color-danger); }
+  .pay-row.voided { opacity:0.6; }
+  .pay-row.voided .pr-main, .pay-row.voided .pr-amt { text-decoration: line-through; }
+  .pay-form { border:1px solid var(--color-border); border-radius:9px; padding:10px 12px; margin:8px 0; }
+  .pay-form .pf-title { font-size:12.5px; font-weight:700; margin-bottom:8px; }
+  .payer-toggle { display:flex; gap:6px; }
+  .payer-toggle button { flex:1 1 0; padding:9px 6px; border-radius:7px; border:1px solid var(--color-border); background: var(--color-bg); color: var(--color-text); font-size:13px; font-family:inherit; cursor:pointer; }
+  .payer-toggle button.on { border-color: var(--color-accent); background: var(--color-accent); color:#fff; font-weight:700; }
+  .pay-warn { margin:8px 0; padding:9px 12px; border-radius:8px; font-size:12.5px; background:#FBEFC0; color:#6B5300; }
+  .pay-err { margin:8px 0; padding:9px 12px; border-radius:8px; font-size:12.5px; background:#F3C3BC; color:#7A1F12; }
+  .pay-ok { margin:8px 0; padding:9px 12px; border-radius:8px; font-size:12.5px; background:#D9F0D2; color:#1F5A14; }
+  .pay-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .stage-note { font-size:12px; margin-top:5px; color: var(--color-text-muted); }
+  .stage-note.block { color: var(--color-danger); }
   details.form-section summary { padding:10px 0 6px; font-size:12.5px; font-weight:700; cursor:pointer; color: var(--color-text-muted); }
   .attach-links { margin-top:8px; }
   .attach-links a { display:block; font-size:12.5px; color: var(--color-accent-2); word-break:break-all; margin-bottom:3px; }
@@ -947,6 +974,7 @@
     deals: {},
     tasks: {},
     followups: {},
+    payments: {},      // Payments ledger rows by id (Phase 2)
     metaRecords: {},
     dailyWeeklyTargets: null, // populated from the meta sheet once loaded; DEFAULT_DAILY_WEEKLY_TARGETS used until then
     goalsHistory: {},   // monthKey -> {leadsGoal,quotesGoal,closedGoal,revenueGoal,updatedAt}
@@ -987,7 +1015,7 @@
   var CLIENT_ID = '632947276461-4k1j3boj2cjif948kn53da71et6s70kk.apps.googleusercontent.com';
   var SYNC_POLL_MS = 20000;
   var jsonpCounter = 0;
-  var STATE_KEY_FOR_SHEET = { contacts:'contacts', deals:'deals', tasks:'tasks', goals:'goalsHistory', followups:'followups', meta:'metaRecords' };
+  var STATE_KEY_FOR_SHEET = { contacts:'contacts', deals:'deals', tasks:'tasks', goals:'goalsHistory', followups:'followups', meta:'metaRecords', payments:'payments' };
 
   function scriptConfigured(){
     return !!SCRIPT_URL && SCRIPT_URL.indexOf('PASTE_YOUR') === -1 && SCRIPT_URL.indexOf('http') === 0;
@@ -1090,6 +1118,11 @@
     // override carries it; it rides outside `data`, so it is never stored
     // and never part of the field verification below.
     if (sheetName === 'contacts' && options && options.contactDuplicateOverride) postBody.contactDuplicateOverride = options.contactDuplicateOverride;
+    // User-confirmed overpayment acknowledgements ride outside `data` the
+    // same way (never stored, never part of field verification).
+    if (sheetName === 'payments' && options && options.overpaymentConfirmed) postBody.overpaymentConfirmed = true;
+    if (sheetName === 'deals' && options && options.invoiceOverpaymentConfirmed) postBody.invoiceOverpaymentConfirmed = true;
+    if (sheetName === 'deals' && options && options.legacyMismatchConfirmed) postBody.legacyMismatchConfirmed = true;
     if (DIRECT_CONFIRM_SHEETS[sheetName]){
       // Read the server's own reply to this save; anything short of a clear,
       // matching success falls back to verifyWrite() exactly as before.
@@ -1104,14 +1137,20 @@
   // Sheets whose Apps Script save handler returns the just-written record
   // (see saveConfirmation_ in Code.gs). 'meta' is not listed and keeps the
   // re-read-only path.
-  var DIRECT_CONFIRM_SHEETS = { contacts:true, deals:true, tasks:true, goals:true, followups:true };
+  var DIRECT_CONFIRM_SHEETS = { contacts:true, deals:true, tasks:true, goals:true, followups:true, payments:true };
   // How long to wait for the save's reply before falling back to the
   // re-read path (the write may still land; the re-read finds out).
   var SAVE_RESPONSE_TIMEOUT_MS = 5000;
   // Server errors that are returned BEFORE anything is written (validation,
   // permission, lock, duplicate). Anything else unexpected is treated as
   // ambiguous and goes through the full re-read instead.
-  var DEFINITIVE_SAVE_ERRORS = { duplicate_contact:true, forbidden:true, lock_timeout:true, invalid_request:true };
+  var DEFINITIVE_SAVE_ERRORS = { payment_id_reserved:true, legacy_itemize_forbidden:true, legacy_itemize_invalid:true, legacy_itemize_mismatch_unconfirmed:true, duplicate_contact:true, forbidden:true, lock_timeout:true, invalid_request:true,
+    // Payments ledger (Phase 1 server rules) and Phase 2 opportunity rules:
+    // every one of these is returned before anything is written.
+    payment_forbidden:true, payment_invalid:true, payment_future_date:true, overpayment_unconfirmed:true,
+    refund_exceeds_remaining:true, refund_link_invalid:true, refund_before_payment:true, payment_has_refunds:true,
+    payment_voided_locked:true, deal_not_found:true, invoice_overpayment_unconfirmed:true, followup_not_allowed:true,
+    zero_invoice_invalid:true };
   // Same request as apiPostRaw (same URL, same plain-text JSON body, same
   // token, no cookies, no custom headers — still a CORS "simple request",
   // so no preflight), but in normal CORS mode so the JSON reply Apps Script
@@ -1148,7 +1187,10 @@
       if (matches){
         var META = { updatedAt:true, updatedBy:true, _version:true, createdAt:true, createdBy:true };
         var fields = sheetName === 'deals' ? Object.keys(data).filter(function(k){ return !META[k]; }) : Object.keys(data);
-        if (fields.every(function(k){ return sameValue(rec[k], data[k]); })){
+        if (fields.every(function(k){ return savedFieldMatches(sheetName, k, rec[k], data[k]); })){
+          // A payment save can also update its opportunity in the same
+          // server lock (C1 payment date, or the D20 move back).
+          if (sheetName === 'payments' && res.deal && res.deal.id) applyConfirmedRecord('deals', res.deal);
           applyConfirmedRecord(sheetName, rec);
           setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle();
           return { status:'saved', record: rec };
@@ -1167,7 +1209,7 @@
         var key = STATE_KEY_FOR_SHEET[sheetName];
         var current = (snap && snap.ok ? (snap[sheetName]||[]).filter(function(r){ return String(r.id) === String(id); })[0] : null) || null;
         setSyncBadge('failed');
-        return { status:'failed', record: current || (state[key] ? state[key][id] : null) || null, error: res.error };
+        return { status:'failed', record: current || (state[key] ? state[key][id] : null) || null, error: res.error, detail: res };
       }
     }
     return verifyWrite(sheetName, id, data, expectedVersion, startedAt, 0, options);
@@ -1186,6 +1228,12 @@
   // Tolerant equality for comparing a submitted field value against what the
   // server reads back — Sheets can round-trip a number/boolean through a
   // slightly different JS representation without that being a real mismatch.
+  // legacyItemizedAt is stamped with the SERVER's time ("Mark legacy amount
+  // as itemized"), so it is confirmed by being set, not by equal text.
+  function savedFieldMatches(sheetName, k, saved, sent){
+    if (sheetName === 'deals' && k === 'legacyItemizedAt' && sent) return !!saved;
+    return sameValue(saved, sent);
+  }
   function sameValue(a, b){
     if (a === b) return true;
     if (a == null && b == null) return true;
@@ -1231,7 +1279,7 @@
     // this session's own; these fields were never what needed confirming.
     var DEAL_METADATA_FIELDS = { updatedAt:true, updatedBy:true, _version:true, createdAt:true, createdBy:true };
     var fieldsToVerify = sheetName === 'deals' ? Object.keys(data).filter(function(k){ return !DEAL_METADATA_FIELDS[k]; }) : Object.keys(data);
-    var fieldsMatch = mine && fieldsToVerify.every(function(k){ return sameValue(current[k], data[k]); });
+    var fieldsMatch = mine && fieldsToVerify.every(function(k){ return savedFieldMatches(sheetName, k, current[k], data[k]); });
     if (mine && fieldsMatch){
       setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle();
       return { status:'saved', record: current };
@@ -1285,7 +1333,22 @@
   function el(html){ var t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
   function fmtMoney(n){ n = Number(n)||0; return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
   function fmtMoneyPrecise(n){ n = Number(n)||0; return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-  function dealBalance(d){ return Math.max(0, Number(d.finalInvoice||d.quoteAmount||0) - Number(d.amountPaid||0)); }
+  // Balance used by Pipeline cards, Today and Operations. An opportunity
+  // with ledger rows uses the ledger (Balance Due, or Estimated Balance when
+  // only a Quote exists; $0 when nothing is owed or there's no basis).
+  // An opportunity with NO ledger rows keeps the exact legacy figure until
+  // it is itemized (display-only backward compatibility).
+  function dealBalance(d){
+    var rows = paymentsForDeal(d.id);
+    // Unresolved legacy amount: no authoritative balance (see isLegacyUnresolved).
+    if (isLegacyUnresolved(d, rows)) return 0;
+    // No ledger rows and no legacy amount: the established figure (same
+    // result as the ledger with nothing paid). A reconciled legacy record
+    // (marker set) always uses the ledger, even with no rows.
+    if (!rows.length && !(Number(d.amountPaid) > 0)) return Math.max(0, Number(d.finalInvoice||d.quoteAmount||0));
+    var s = paymentSummary(d, rows);
+    return s.balanceCents == null ? 0 : Math.max(0, s.balanceCents) / 100;
+  }
   function esc(s){ if (s===undefined || s===null) return ''; return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function attachmentIcon(mimeType){
     mimeType = mimeType || '';
@@ -1770,7 +1833,13 @@
       // latest value wins (plain overwrite); different fields -> both kept
       // (plain merge). This is exactly what Object.assign already does.
       var priorQueued = dealWriteQueue[id] ? dealWriteQueue[id].patch : {};
-      dealWriteQueue[id] = { patch: Object.assign({}, priorQueued, patch), options: options };
+      // Options merge too: a confirmation flag given for any queued part
+      // (e.g. the FD4 invoice-overpayment Continue) is kept for the merged write.
+      var priorOpts = dealWriteQueue[id] ? (dealWriteQueue[id].options || {}) : {};
+      var mergedOpts = Object.assign({}, priorOpts, options || {});
+      if (priorOpts.invoiceOverpaymentConfirmed || (options && options.invoiceOverpaymentConfirmed)) mergedOpts.invoiceOverpaymentConfirmed = true;
+      if (priorOpts.legacyMismatchConfirmed || (options && options.legacyMismatchConfirmed)) mergedOpts.legacyMismatchConfirmed = true;
+      dealWriteQueue[id] = { patch: Object.assign({}, priorQueued, patch), options: mergedOpts };
       return Promise.resolve({ status:'queued' });
     }
 
@@ -1787,6 +1856,15 @@
           if (!dealWriteQueue[id] || !dealWriteQueue[id].patch.hasOwnProperty(k)) delete dealPendingFields[id][k];
         });
         if (Object.keys(dealPendingFields[id]).length === 0) delete dealPendingFields[id];
+      }
+      // A definitive server refusal (e.g. the Customer Follow-up gate) wrote
+      // nothing: show the authoritative record instead of the refused patch.
+      if (result.status === 'failed' && result.error && DEFINITIVE_SAVE_ERRORS[result.error] && !dealPendingFields[id] && !dealWriteQueue[id]){
+        // result.record is the fresh server copy, unless the refresh failed
+        // and it is just this optimistic record — then restore the copy from
+        // before the refused patch.
+        var restore = (result.record && result.record !== state.deals[id]) ? result.record : existing;
+        if (restore){ state.deals[id] = restore; persistLocal(); render(); }
       }
       dispatchQueuedDealWrite(id, result.status, result.record);
       return result;
@@ -1950,7 +2028,7 @@
   // reload — never the record of truth, and never presented to the
   // employee as "saved to the CRM." See setSyncBadge for that distinction.
   function persistLocal(){
-    try { localStorage.setItem('sgc-crm-cache', JSON.stringify({ contacts: state.contacts, deals: state.deals, tasks: state.tasks, goalsHistory: state.goalsHistory })); } catch(e){}
+    try { localStorage.setItem('sgc-crm-cache', JSON.stringify({ contacts: state.contacts, deals: state.deals, tasks: state.tasks, goalsHistory: state.goalsHistory, payments: state.payments })); } catch(e){}
   }
   function loadLocal(){
     try {
@@ -1961,6 +2039,7 @@
         state.deals = parsed.deals || {};
         state.tasks = parsed.tasks || {};
         state.goalsHistory = parsed.goalsHistory || {};
+        state.payments = parsed.payments || {};
       }
     } catch(e){}
     if (Object.keys(state.goalsHistory).length === 0){
@@ -1986,10 +2065,12 @@
     var tasksMap = {}; (data.tasks||[]).forEach(function(t){ tasksMap[t.id] = t; });
     var goalsMap = {}; (data.goals||[]).forEach(function(g){ goalsMap[g.id] = g; });
     var followupsMap = {}; (data.followups||[]).forEach(function(f){ followupsMap[f.id] = f; });
+    var paymentsMap = {}; (data.payments||[]).forEach(function(p){ paymentsMap[p.id] = p; });
     state.contacts = contactsMap;
     state.deals = dealsMap;
     state.tasks = tasksMap;
     state.followups = followupsMap;
+    state.payments = paymentsMap;
     if (Object.keys(goalsMap).length) state.goalsHistory = goalsMap;
     var metaMap = {}; (data.meta||[]).forEach(function(m){ metaMap[m.id] = m; });
     state.metaRecords = metaMap;
@@ -2001,6 +2082,7 @@
     if (targetsMeta) state.dailyWeeklyTargets = Object.assign({}, DEFAULT_DAILY_WEEKLY_TARGETS, targetsMeta);
     persistLocal();
     render();
+    refreshOpenBilling();
   }
   function findContactByName(name){
     var lower = name.trim().toLowerCase();
@@ -2694,7 +2776,8 @@
         if (d.partsStatus && d.partsStatus !== 'Not needed') tags += '<span class="kc-tag">'+esc(d.partsStatus)+'</span>';
         if (d.insuranceAuthorized === 'pending') tags += '<span class="kc-tag">Insurance pending</span>';
         var balance = dealBalance(d);
-        if (balance > 0 && (d.stage === 'job_completed' || isRealized(d.stage))) tags += '<span class="kc-tag" style="background:var(--color-danger);color:#fff;">Balance '+fmtMoneyPrecise(balance)+'</span>';
+        if (isLegacyUnresolved(d)) { if (d.stage === 'job_completed' || isRealized(d.stage)) tags += '<span class="kc-tag">Not itemized (legacy)</span>'; }
+        else if (balance > 0 && (d.stage === 'job_completed' || isRealized(d.stage))) tags += '<span class="kc-tag" style="background:var(--color-danger);color:#fff;">Balance '+fmtMoneyPrecise(balance)+'</span>';
         var card = el(
           '<div class="kcard" data-deal="'+d.id+'"'+(d.archived ? ' style="opacity:0.55;"' : '')+'>' +
             '<div class="kc-title">'+esc(d.title || 'Untitled job')+(isStale ? '<span class="stale-badge">STALE</span>' : '')+(d.archived ? '<span class="stale-badge" style="background:var(--color-text-muted);">ARCHIVED</span>' : '')+'</div>' +
@@ -2746,8 +2829,11 @@
     if (isRealized(newStage)){
       if (!isRealized(oldStage)){
         patch.closedAt = nowIso(); // newly realized just now
-        var invoiceBase = (deal && deal.finalInvoice) || (deal && deal.quoteAmount) || 0;
-        if (!deal || !deal.finalInvoice) patch.finalInvoice = invoiceBase;
+        // Final Invoice fill (Z0): only when there's no authoritative
+        // invoice yet (blank, or a legacy unconfirmed $0) AND a Quote above
+        // $0 exists. Never writes an automatic $0, never overwrites a
+        // confirmed $0.
+        if (deal && !isAuthoritativeInvoice(deal) && Number(deal.quoteAmount) > 0) patch.finalInvoice = Number(deal.quoteAmount);
         // amountPaid is deliberately NOT auto-populated here — entering a
         // realized stage is a workflow milestone, not proof of payment.
         // The actual amount the user enters (including $0, or a partial
@@ -2755,10 +2841,14 @@
         // "Fully Paid" step are what determine payment status.
       }
       // else: already realized (e.g. Payment Received -> Customer Follow-Up) — keep the original closedAt and payment info
-      // Payment received date defaults to today when an opportunity is first
-      // marked paid from the Pipeline (no form to ask in); it can be
-      // corrected later in the opportunity's Billing & payment section.
-      if (!isRealized(oldStage) && !(deal && deal.paymentReceivedDate)) patch.paymentReceivedDate = localDateKey();
+      // C1 compatibility: on entering a paid stage, paymentReceivedDate is
+      // the latest Active ledger payment date; with no payments it keeps
+      // today's existing behavior (stored value if any, else today).
+      if (!isRealized(oldStage)){
+        var latestPay = latestActivePaymentDate(dealId);
+        if (latestPay) patch.paymentReceivedDate = latestPay;
+        else if (!(deal && deal.paymentReceivedDate)) patch.paymentReceivedDate = localDateKey();
+      }
     } else if (newStage === 'closed_lost'){
       patch.closedAt = nowIso();
     } else {
@@ -2774,7 +2864,34 @@
       openLostReasonModal(dealId, selEl);
       return;
     }
-    updateDeal(dealId, stageTransitionPatch(dealId, newStage));
+    var deal = state.deals[dealId];
+    function revertSelect(){ if (selEl && deal) selEl.value = deal.stage; }
+    // Customer Follow-up hard block (D19): no change is written.
+    var patch = stageTransitionPatch(dealId, newStage);
+    // (The gate sees the automatic Final Invoice fill this move applies, as the server does.)
+    if (newStage === 'customer_followup' && deal && deal.stage !== 'customer_followup'){
+      var gate = canEnterCustomerFollowup(deal, patch.hasOwnProperty('finalInvoice') ? { finalInvoice: patch.finalInvoice } : null);
+      if (!gate.ok){ revertSelect(); openInfoModal('Customer Follow-up not available', gate.message); return; }
+    }
+    var send = function(options){
+      return updateDeal(dealId, patch, options).then(function(result){
+        if (result && result.status === 'saved' && newStage === 'job_completed') maybePromptFollowup(dealId);
+        if (result && result.status === 'failed' && result.detail && result.detail.message) openInfoModal('Not saved', result.detail.message);
+        return result;
+      });
+    };
+    // FD4: if the automatic Final Invoice fill would leave Total Paid above
+    // the invoice, confirm first; Cancel leaves the stage unchanged.
+    if (deal && patch.hasOwnProperty('finalInvoice')){
+      var after = paymentSummary(Object.assign({}, deal, { finalInvoice: patch.finalInvoice }));
+      if (after.basisKind === 'invoice' && after.balanceCents < 0){
+        openYesNoModal('Final Invoice overpayment',
+          'Total payments received (' + fmtMoneyPrecise(after.paidCents/100) + ') exceed this Final Invoice (' + fmtMoneyPrecise(after.basisCents/100) + ') by ' + fmtMoneyPrecise(-after.balanceCents/100) + '. Saving this invoice will result in an overpaid balance. Do you want to continue?',
+          'Continue', 'Cancel', function(){ send({ invoiceOverpaymentConfirmed: true }); }, revertSelect);
+        return;
+      }
+    }
+    send();
   }
   function openLostReasonModal(dealId, selEl){
     var deal = state.deals[dealId];
@@ -3124,14 +3241,14 @@
     var staleCutoff = Date.now() - 5*86400000;
     var stale = deals.filter(function(d){ return ['opportunity','hot_lead','quote_sent'].indexOf(d.stage)!==-1 && new Date(d.updatedAt||d.createdAt||0).getTime() < staleCutoff; });
     var scheduledToday = deals.filter(function(d){ return d.scheduledDate === todayKey; }).sort(function(a,b){ return (a.scheduledTime||'').localeCompare(b.scheduledTime||''); });
-    var unpaid = deals.filter(function(d){ return (d.stage==='job_completed' || isRealized(d.stage)) && dealBalance(d) > 0; });
+    var unpaid = deals.filter(needsPaymentAttention);
     var reviews = deals.filter(function(d){ return isRealized(d.stage) && !d.reviewRequested; });
 
     var statRow = document.getElementById('today-stats');
     statRow.innerHTML = [
       ['Follow up', stale.length, 'Stale quotes'],
       ['Appointments', scheduledToday.length, 'Scheduled today'],
-      ['Awaiting payment', unpaid.length, 'Balance still due'],
+      ['Awaiting payment', unpaid.length, 'Payment attention needed'],
       ['Review requests', reviews.length, 'Paid jobs to ask']
     ].map(function(x){ return '<div class="stat-chip"><div class="stat-label">'+esc(x[0])+'</div><div class="stat-val">'+x[1]+'</div><div class="stat-sub">'+esc(x[2])+'</div></div>'; }).join('');
 
@@ -3143,7 +3260,7 @@
       priorityList.forEach(function(d){
         var contact = state.contacts[d.contactId];
         var st = stageInfo(d.stage);
-        var why = dealBalance(d) > 0 && unpaid.indexOf(d)!==-1 ? 'Balance '+fmtMoneyPrecise(dealBalance(d)) : 'Stale quote';
+        var why = unpaid.indexOf(d)!==-1 ? paymentAttentionText(d) : 'Stale quote';
         var row = el('<div class="panel-row" style="cursor:pointer;"><span class="stage-dot" style="background:'+st.color+'"></span><div class="p-main"><div class="p-name">'+esc(d.title||'Untitled job')+'</div><div class="p-meta">'+esc(contact?contact.name:(d.contactName||''))+' &middot; '+esc(why)+'</div></div></div>');
         row.addEventListener('click', function(){ openDealModal(d.id); });
         priorityWrap.appendChild(row);
@@ -3496,7 +3613,7 @@
     var allTasks = Object.keys(state.tasks).map(function(k){ return state.tasks[k]; });
     var openTasks = allTasks.filter(function(t){ return !effectiveTaskDone(t); }).sort(function(a,b){ return (a.dueDate||'').localeCompare(b.dueDate||''); });
     var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; })).filter(function(d){ return !d.archived; });
-    var due = deals.filter(function(d){ return (d.stage==='job_completed' || isRealized(d.stage)) && dealBalance(d) > 0; });
+    var due = deals.filter(needsPaymentAttention);
     var waitingParts = deals.filter(function(d){ return ['Needs ordering','Ordered'].indexOf(d.partsStatus) !== -1; });
     var waitingInsurance = deals.filter(function(d){ return d.insuranceAuthorized === 'pending'; });
 
@@ -3504,7 +3621,7 @@
     document.getElementById('ops-stats').innerHTML = [
       ['Open tasks', openTasks.length, 'Follow-ups and work'],
       ['Past due', pastDueCount, 'Needs immediate attention'],
-      ['Balances due', due.length, 'Payment attention'],
+      ['Payment attention', due.length, 'Payment attention needed'],
       ['Waiting on glass', waitingParts.length, 'Parts action'],
       ['Insurance pending', waitingInsurance.length, 'Approval action']
     ].map(function(x){ return '<div class="stat-chip"><div class="stat-label">'+esc(x[0])+'</div><div class="stat-val">'+x[1]+'</div><div class="stat-sub">'+esc(x[2])+'</div></div>'; }).join('');
@@ -3518,7 +3635,7 @@
       payWrap.innerHTML = '';
       due.forEach(function(d){
         var contact = state.contacts[d.contactId];
-        var row = el('<div class="task-row"><div><div class="t-title">'+esc(d.title||'Untitled job')+'</div><div class="t-meta">'+esc(contact?contact.name:(d.contactName||''))+' &middot; Balance '+fmtMoneyPrecise(dealBalance(d))+'</div></div></div>');
+        var row = el('<div class="task-row"><div><div class="t-title">'+esc(d.title||'Untitled job')+'</div><div class="t-meta">'+esc(contact?contact.name:(d.contactName||''))+' &middot; '+esc(paymentAttentionText(d))+'</div></div></div>');
         var btn = el('<button class="btn btn-ghost btn-sm">Open</button>');
         btn.addEventListener('click', function(){ openDealModal(d.id); });
         row.appendChild(btn);
@@ -4365,6 +4482,543 @@
       if (btn.hasAttribute('data-idle-label')){ btn.textContent = btn.getAttribute('data-idle-label'); btn.removeAttribute('data-idle-label'); }
     }
   }
+  // ======================================================================
+  // PAYMENTS LEDGER — Phase 2 (Opportunity Billing & payment)
+  // ======================================================================
+  // The ledger (state.payments, one row per transaction, saved through the
+  // Phase 1 server handler) is the only source of Total Paid. Every money
+  // rule below matches Code.gs (paymentSummaryForDeal_, followupBlockReason_).
+  var PAY_PAYERS = ['Customer', 'Insurance', 'Other'];   // 'Not recorded' is migration-only and never offered
+  var PAY_TYPES = ['Deposit', 'Partial Payment', 'Final Payment', 'Other'];
+  var PAY_REFUND_REASONS = ['Customer cancellation', 'Pricing adjustment', 'Insurance adjustment', 'Duplicate payment', 'Overpayment returned', 'Other'];
+  function payCents(v){ return Math.round(Number(v) * 100); }
+  function fmtCents(c){ return fmtMoneyPrecise((c || 0) / 100); }
+  function paymentsForDeal(dealId){
+    var all = state.payments || {}, out = [];
+    Object.keys(all).forEach(function(k){ if (String(all[k].dealId) === String(dealId)) out.push(all[k]); });
+    return out;
+  }
+  // Z0: a Final Invoice is authoritative when above $0, or exactly $0 AND
+  // explicitly confirmed (zeroInvoiceConfirmedAt). Blank or an unconfirmed
+  // legacy $0 is treated as no invoice.
+  function isAuthoritativeInvoice(d){
+    if (!d) return false;
+    var fi = d.finalInvoice;
+    if (fi === null || fi === undefined || fi === '') return false;
+    var n = Number(fi);
+    return n > 0 || (n === 0 && !!d.zeroInvoiceConfirmedAt);
+  }
+  function latestActivePaymentDate(dealId){
+    var latest = null;
+    paymentsForDeal(dealId).forEach(function(p){
+      if (p.txnType === 'Payment' && p.status === 'Active' && (!latest || p.paymentDate > latest)) latest = p.paymentDate;
+    });
+    return latest;
+  }
+  // Total Paid, basis, balance and the calculated Payment Status (cents).
+  //   TotalPaid = Active Payments - Active Refunds
+  //   basis     = authoritative Final Invoice ("Balance due"), else Quote > $0
+  //               ("Estimated balance"), else none (Unknown Balance)
+  //   status, first match wins: Unknown Balance -> No Payment Required ->
+  //   No Payment -> Partially Paid -> Paid in Full -> Overpaid
+  function paymentSummary(d, rows){
+    rows = rows || paymentsForDeal(d.id);
+    var paid = 0;
+    rows.forEach(function(p){
+      if (p.status !== 'Active') return;
+      if (p.txnType === 'Payment') paid += payCents(p.amount);
+      else if (p.txnType === 'Refund') paid -= payCents(p.amount);
+    });
+    var basisKind = null, basisCents = null;
+    if (isAuthoritativeInvoice(d)){ basisKind = 'invoice'; basisCents = payCents(d.finalInvoice); }
+    else if (Number(d.quoteAmount) > 0){ basisKind = 'quote'; basisCents = payCents(d.quoteAmount); }
+    var legacyNotItemized = isLegacyUnresolved(d, rows);
+    // Unresolved legacy amount: the ledger holds only NEW money, so no
+    // authoritative balance or status exists (never legacy + ledger).
+    var balance = (basisCents == null || legacyNotItemized) ? null : basisCents - paid;
+    var status;
+    if (legacyNotItemized) status = 'Not itemized (legacy)';
+    else if (basisCents == null) status = 'Unknown Balance';
+    else if (basisKind === 'invoice' && basisCents === 0 && paid === 0) status = 'No Payment Required';
+    else if (paid === 0 && balance > 0) status = 'No Payment';
+    else if (paid > 0 && balance > 0) status = 'Partially Paid';
+    else if (balance === 0 && paid > 0) status = 'Paid in Full';
+    else if (balance < 0) status = 'Overpaid';
+    else status = 'No Payment';
+    return {
+      paidCents: paid, basisKind: basisKind, basisCents: basisCents, balanceCents: balance, status: status,
+      estimated: basisKind === 'quote' && !legacyNotItemized, hasLedger: rows.length > 0, legacyNotItemized: legacyNotItemized,
+      legacyCents: legacyNotItemized ? payCents(d.amountPaid) : 0,
+      // Customer Follow-up money test: Paid in Full or No Payment Required on
+      // an authoritative invoice; never for un-itemized legacy amounts.
+      obligationMet: basisKind === 'invoice' && balance === 0 && !legacyNotItemized
+    };
+  }
+  // THE single definition of the unresolved legacy state (approved Option A),
+  // identical to legacyUnresolved_() in Code.gs: legacy amountPaid > 0, and
+  // neither the reconciliation marker (legacyItemizedAt) nor the Phase 3
+  // migrated transaction pay-mig-<dealId> (origin Migrated) exists. Ordinary
+  // ledger rows, active or voided, never resolve it.
+  function isLegacyUnresolved(d, rows){
+    if (!d || !(Number(d.amountPaid) > 0) || d.legacyItemizedAt) return false;
+    rows = rows || paymentsForDeal(d.id);
+    var migId = 'pay-mig-' + d.id;
+    return !rows.some(function(p){ return String(p.id) === migId && String(p.dealId) === String(d.id) && p.origin === 'Migrated'; });
+  }
+  // Pipeline / Today / Operations wording for an opportunity that needs
+  // payment attention. Unresolved legacy records never show a balance:
+  // the legacy amount and any new ledger payments are shown separately.
+  function legacyAttentionText(d){
+    var s = paymentSummary(d);
+    return 'Legacy paid ' + fmtMoneyPrecise(d.amountPaid) + ' (not itemized)' + (s.hasLedger ? ' \u00b7 New payments ' + fmtCents(s.paidCents) : '');
+  }
+  function paymentAttentionText(d){
+    return isLegacyUnresolved(d) ? legacyAttentionText(d) : 'Balance ' + fmtMoneyPrecise(dealBalance(d));
+  }
+  // Listed under "Awaiting payment" / "Payment attention" (Job Completed,
+  // Payment Received, Customer Follow-up): a balance above $0, or ANY
+  // unresolved legacy record — whether money is owed is unknown until it is
+  // reconciled, so no legacy figure decides it. Labeled, never given a balance.
+  function needsPaymentAttention(d){
+    if (!(d.stage === 'job_completed' || isRealized(d.stage))) return false;
+    if (isLegacyUnresolved(d)) return true;
+    return dealBalance(d) > 0;
+  }
+  // Customer Follow-up gate (D18, D19, FD2, Z0). `fin` optionally overrides
+  // the financial fields being saved in the same change (finalInvoice,
+  // zeroInvoiceConfirmedAt); the job-completed test uses the stage BEFORE
+  // the move.
+  function canEnterCustomerFollowup(d, fin){
+    if (!d) return { ok:false, reason:'Job not completed.', message:'Customer Follow-up is available only after the job is completed and paid in full. Job not completed.' };
+    var cand = fin ? Object.assign({}, d, fin) : d;
+    var jobDone = !!d.jobCompletedAt || d.stage === 'job_completed' || d.stage === 'payment_received';
+    var s = paymentSummary(cand);
+    var reason = '';
+    if (!jobDone) reason = 'Job not completed.';
+    else if (s.legacyNotItemized) reason = 'Payments not itemized yet.';
+    else if (s.basisKind !== 'invoice') reason = 'Final Invoice not entered.';
+    else if (s.balanceCents > 0) reason = fmtCents(s.balanceCents) + ' still due.';
+    else if (s.balanceCents < 0) reason = 'Overpaid by ' + fmtCents(-s.balanceCents) + ' — resolve with a refund first.';
+    return { ok: !reason, reason: reason, message: reason ? 'Customer Follow-up is available only after the job is completed and paid in full. ' + reason : '' };
+  }
+  function isPaymentManager(){ var r = state.currentUser && state.currentUser.role; return r === 'Admin' || r === 'Manager'; }
+  function fmtPayDate(k){ if (!k) return ''; var d = parseDateOnlyLocal(k); return d ? d.toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }) : k; }
+  function payerLabel(p){ return p.payer === 'Other' ? (p.otherPayer || 'Other') : (p.payer || ''); }
+  function openInfoModal(title, message){
+    modalBox.innerHTML =
+      '<div class="modal-head"><div class="modal-title">'+esc(title)+'</div><button class="modal-close" id="if-close">&times;</button></div>' +
+      '<div style="font-size:13.5px;color:var(--color-text-muted);margin-bottom:4px;">'+esc(message)+'</div>' +
+      '<div class="modal-actions"><span></span><div class="right"><button type="button" class="btn btn-primary" id="if-ok">OK</button></div></div>';
+    backdrop.hidden = false;
+    document.getElementById('if-close').addEventListener('click', closeModal);
+    document.getElementById('if-ok').addEventListener('click', closeModal);
+  }
+  // Paid-in-full prompt outside the opportunity form (Pipeline move, or
+  // right after the form closed). Only when every Customer Follow-up
+  // condition is now met. "Not Now" writes nothing.
+  function maybePromptFollowup(dealId){
+    var d = state.deals[dealId];
+    if (!d || d.stage === 'customer_followup' || !canEnterCustomerFollowup(d).ok) return;
+    openYesNoModal('Paid in full', 'This opportunity is now paid in full. Move it to Customer Follow-up?', 'Yes', 'Not Now',
+      function(){ moveToFollowup(dealId).then(function(result){
+        if (result && result.status === 'failed' && result.detail && result.detail.message) openInfoModal('Stage not changed', result.detail.message + ' The payment is saved.');
+      }); }, function(){});
+  }
+  function moveToFollowup(dealId){
+    var d = state.deals[dealId];
+    var gate = canEnterCustomerFollowup(d);
+    if (!gate.ok){ openInfoModal('Customer Follow-up not available', gate.message); return Promise.resolve({ status:'failed' }); }
+    return updateDeal(dealId, stageTransitionPatch(dealId, 'customer_followup'));
+  }
+  function refreshOpenBilling(){
+    var c = state.openBilling;
+    if (c && state.openDealModalId === c.dealId && document.getElementById('dm-pay-history')) c.refresh(false);
+  }
+  // Saves one payment/refund/void through the existing confirmed-write
+  // pipeline. "saved" only when the server's read-back of THIS transaction
+  // (stable id, version, every submitted field) matches.
+  function savePayment(id, data, expectedVersion, opts){
+    return confirmedWrite('payments', id, data, expectedVersion, Object.assign({ silent:true }, opts || {}));
+  }
+  function paymentErrorText(err, detail){
+    if (detail && detail.message) return detail.message;
+    var map = {
+      payment_forbidden: 'Only a Manager or Admin can change, void or refund a saved payment.',
+      payment_future_date: 'The payment date can’t be in the future.',
+      refund_link_invalid: 'That payment can no longer be refunded (it may have been voided).',
+      refund_before_payment: 'A refund can’t be dated before the original payment.',
+      payment_has_refunds: 'This payment has refunds. Void its refunds first.',
+      payment_voided_locked: 'This transaction is voided and can no longer be changed.',
+      deal_not_found: 'This opportunity no longer exists.',
+      payment_invalid: 'Some details are missing or invalid' + (detail && detail.field ? ' (' + detail.field + ')' : '') + '.'
+    };
+    return map[err] || 'Not saved — check your connection and try again. Nothing you’ve entered has been lost.';
+  }
+
+  // Billing & payment controller for the open Opportunity form.
+  // hooks: getDeal() -> current saved record; onDealChanged(prevDeal, newDeal)
+  function mountBilling(dealId, hooks){
+    var ui = { formOpen: null, showVoided: false, prompt: false };
+    var ctrl = { dealId: dealId };
+    function $(id){ return document.getElementById(id); }
+    function deal(){ return hooks.getDeal(); }
+
+    function renderSummary(){
+      var box = $('dm-pay-summary'); if (!box) return;
+      var d = deal(); if (!d) return;
+      var s = paymentSummary(d);
+      var rows = '<div class="pb-row"><span>Quote</span><strong>'+(Number(d.quoteAmount) > 0 ? fmtMoneyPrecise(d.quoteAmount) : '&mdash;')+'</strong></div>' +
+        '<div class="pb-row"><span>Final invoice</span><strong>'+(isAuthoritativeInvoice(d) ? fmtMoneyPrecise(d.finalInvoice) + (Number(d.finalInvoice) === 0 ? ' (no charge)' : '') : '&mdash; (not entered)')+'</strong></div>' +
+        (s.legacyNotItemized ? '' : '<div class="pb-row"><span>Total paid</span><strong>'+fmtCents(s.paidCents)+'</strong></div>');
+      var notes = '';
+      var legacyAction = '';
+      if (s.legacyNotItemized){
+        // Shown separately, never added together, no balance (approved Option A).
+        rows += '<div class="pb-row"><span>Legacy Amount Paid (not itemized)</span><strong>'+fmtMoneyPrecise(d.amountPaid)+'</strong></div>' +
+          '<div class="pb-row"><span>New Ledger Payments</span><strong>'+fmtCents(s.paidCents)+'</strong></div>' +
+          '<div class="pb-status" id="dm-pay-status">Not itemized (legacy)</div>';
+        notes = 'This legacy amount was recorded before the payment ledger and has not been reconciled. New payments are recorded separately and are not added to it. A Balance Due and Payment Status can be determined only after the legacy amount is reconciled into the ledger (Manager/Admin: Mark legacy amount as itemized).';
+        if (isPaymentManager()) legacyAction = '<div class="pay-actions"><button type="button" class="btn btn-ghost btn-sm" id="dm-legacy-mark">Mark legacy amount as itemized</button></div><div id="dm-legacy-box"></div>';
+      } else {
+        if (s.basisKind === 'invoice') rows += '<div class="pb-row"><span>BALANCE DUE</span><strong>'+(s.balanceCents < 0 ? '−' + fmtCents(-s.balanceCents) : fmtCents(s.balanceCents))+'</strong></div>';
+        else if (s.basisKind === 'quote') rows += '<div class="pb-row"><span>Estimated balance*</span><strong>'+(s.balanceCents < 0 ? '−' + fmtCents(-s.balanceCents) : fmtCents(s.balanceCents))+'</strong></div>';
+        rows += '<div class="pb-status" id="dm-pay-status">'+esc(s.status + (s.estimated ? ' (estimated)' : ''))+'</div>';
+        if (s.basisKind === 'quote') notes = s.balanceCents === 0 ? '* Based on the quote. Enter the Final Invoice to complete this job\u2019s billing.' : '* Based on the quote. Enter the Final Invoice for the actual balance due.';
+        else if (!s.basisKind) notes = 'Enter a Quote or Final Invoice to calculate the balance.';
+      }
+      box.className = 'pay-box' + (s.basisKind === 'quote' && !s.legacyNotItemized ? ' est' : '');
+      box.innerHTML = rows + (notes ? '<div class="pb-note">'+esc(notes)+'</div>' : '') + legacyAction;
+      if ($('dm-legacy-mark')) $('dm-legacy-mark').addEventListener('click', openLegacyConfirm);
+      if (hooks.onSummary) hooks.onSummary(s);
+    }
+    // "Mark legacy amount as itemized" (Manager/Admin). Confirms only that
+    // the historical amount is already accounted for in the ledger. Creates,
+    // changes or voids no payment; amountPaid, paymentReceivedDate, the
+    // Final Invoice and the stage are not touched. Differing totals need a
+    // second, explicit acknowledgement.
+    function openLegacyConfirm(){
+      var box = $('dm-legacy-box'); if (!box) return;
+      var d = deal(); var s = paymentSummary(d);
+      var legacyC = payCents(d.amountPaid), ledgerC = s.paidCents, differ = legacyC !== ledgerC;
+      box.innerHTML = '<div class="pay-warn" id="dm-legacy-confirm">' +
+        '<div><strong>Legacy Amount Paid:</strong> ' + fmtCents(legacyC) + '</div><div><strong>Current Ledger Total:</strong> ' + fmtCents(ledgerC) + '</div>' +
+        '<div style="margin-top:6px;">This confirms the historical legacy amount has already been accounted for in the Payments ledger. The legacy Amount Paid will no longer be used for this opportunity\u2019s financial display; Balance Due and Payment Status will come from the ledger only. No payment is created or changed.</div>' +
+        (differ ? '<div class="pay-err" style="margin-top:6px;" id="dm-legacy-differ">The ledger total (' + fmtCents(ledgerC) + ') does NOT equal the legacy amount paid (' + fmtCents(legacyC) + '). Difference: ' + fmtCents(Math.abs(legacyC - ledgerC)) + '. Nothing will be adjusted automatically.' +
+          '<label style="display:flex;gap:6px;align-items:flex-start;margin-top:6px;font-weight:600;"><input type="checkbox" id="dm-legacy-ack" form="pf-detached"> I understand the amounts differ and still want to mark the legacy amount as itemized.</label></div>' : '') +
+        '<div class="pay-actions"><button type="button" class="btn btn-primary btn-sm" id="dm-legacy-yes"'+(differ ? ' disabled' : '')+'>Mark as itemized</button><button type="button" class="btn btn-ghost btn-sm" id="dm-legacy-no">Cancel</button></div>' +
+        '<div id="dm-legacy-err"></div></div>';
+      if (differ) $('dm-legacy-ack').addEventListener('change', function(){ $('dm-legacy-yes').disabled = !$('dm-legacy-ack').checked; });
+      $('dm-legacy-no').addEventListener('click', function(){ box.innerHTML = ''; });
+      $('dm-legacy-yes').addEventListener('click', async function(){
+        var btn = $('dm-legacy-yes');
+        setSubmitBusy(btn, true);
+        var beforeDeal = deal();
+        var result = await updateDeal(dealId, { legacyItemizedAt: nowIso() }, { silent:true, legacyMismatchConfirmed: differ && $('dm-legacy-ack') && $('dm-legacy-ack').checked });
+        if (!document.getElementById('dm-legacy-yes')) { ctrl.refresh(false); return; }
+        setSubmitBusy(btn, false);
+        if (result.status === 'queued'){
+          box.innerHTML = '';
+          setMsg('ok', 'Saving\u2026 the legacy marker is queued behind another save for this opportunity.');
+        } else if (result.status === 'saved'){
+          box.innerHTML = '';
+          ctrl.refresh(false);
+          if (hooks.onDealChanged) hooks.onDealChanged(beforeDeal, state.deals[dealId]);
+          setMsg('ok', 'Legacy amount marked as itemized. Balance and status now come from the ledger.');
+        } else {
+          var e = $('dm-legacy-err');
+          if (e) e.innerHTML = '<div class="pay-err">'+esc(result.detail && result.detail.message ? result.detail.message : (result.status === 'conflict' ? 'Someone else changed this opportunity. Review it and try again.' : 'Not saved \u2014 check your connection and try again.'))+'</div>';
+          ctrl.refresh(false);
+        }
+      });
+    }
+    function renderHistory(){
+      var wrap = $('dm-pay-history'); if (!wrap) return;
+      var list = paymentsForDeal(dealId).slice().sort(function(a,b){
+        return (b.paymentDate||'').localeCompare(a.paymentDate||'') || String(b.createdAt||'').localeCompare(String(a.createdAt||''));
+      });
+      var voided = list.filter(function(p){ return p.status === 'Voided'; });
+      var shown = ui.showVoided ? list : list.filter(function(p){ return p.status !== 'Voided'; });
+      var byId = {}; list.forEach(function(p){ byId[p.id] = p; });
+      var html = '<div class="pay-hist-head"><span>PAYMENT HISTORY</span>' + (voided.length ? '<button type="button" class="btn btn-ghost btn-sm" id="dm-pay-toggle-voided">'+(ui.showVoided ? 'Hide voided' : 'Show voided ('+voided.length+')')+'</button>' : '') + '</div>';
+      if (!shown.length) html += '<div class="empty-note" style="padding:6px 0;">No payments recorded yet.</div>';
+      shown.forEach(function(p){
+        var isRefund = p.txnType === 'Refund';
+        var main = fmtPayDate(p.paymentDate) + ' · ' + (isRefund ? 'Refund to ' + payerLabel(p) + ' · ' + (p.refundReason || '') : payerLabel(p) + (p.paymentType ? ' · ' + p.paymentType : ''));
+        var sub = [];
+        if (isRefund && p.relatedPaymentId){ var orig = byId[p.relatedPaymentId]; sub.push('↳ refund of ' + (orig ? fmtPayDate(orig.paymentDate) + ' payment' : 'a payment')); }
+        if (p.notes) sub.push(p.notes);
+        if (p.status === 'Voided') sub.push('Voided' + (p.voidReason ? ': ' + p.voidReason : ''));
+        if (p.origin === 'Migrated') sub.push('Migrated from legacy fields');
+        html += '<div class="pay-row'+(isRefund ? ' refund' : '')+(p.status === 'Voided' ? ' voided' : '')+'" data-pay-id="'+esc(p.id)+'">' +
+          '<div class="pr-main">'+esc(main)+(sub.length ? '<div class="pr-sub">'+sub.map(esc).join(' · ')+'</div>' : '')+'</div>' +
+          '<div class="pr-amt">'+(isRefund ? '−' : '')+fmtMoneyPrecise(p.amount)+' ›</div></div>';
+      });
+      wrap.innerHTML = html;
+      var tv = $('dm-pay-toggle-voided');
+      if (tv) tv.addEventListener('click', function(){ ui.showVoided = !ui.showVoided; renderHistory(); });
+      Array.prototype.forEach.call(wrap.querySelectorAll('.pay-row'), function(row){
+        row.addEventListener('click', function(){ openDetail(state.payments[row.getAttribute('data-pay-id')]); });
+      });
+    }
+    function setMsg(kind, text){
+      var m = $('dm-pay-msg'); if (!m) return;
+      m.innerHTML = text ? '<div class="'+(kind === 'ok' ? 'pay-ok' : kind === 'warn' ? 'pay-warn' : 'pay-err')+'">'+esc(text)+'</div>' : '';
+    }
+    ctrl.refresh = function(force){
+      renderSummary();
+      renderHistory();
+      if (force) renderPrompt();
+    };
+    ctrl.setMsg = setMsg;
+
+    // ---- inline paid-in-full prompt (form stays open) ----
+    function renderPrompt(){
+      var p = $('dm-pay-prompt'); if (!p) return;
+      if (!ui.prompt){ p.innerHTML = ''; return; }
+      p.innerHTML = '<div class="pay-warn">This opportunity is now paid in full. Move it to Customer Follow-up?' +
+        '<div class="pay-actions"><button type="button" class="btn btn-primary btn-sm" id="dm-prompt-yes">Yes</button><button type="button" class="btn btn-ghost btn-sm" id="dm-prompt-no">Not Now</button></div></div>';
+      $('dm-prompt-no').addEventListener('click', function(){ ui.prompt = false; renderPrompt(); });
+      $('dm-prompt-yes').addEventListener('click', function(){
+        ui.prompt = false; renderPrompt();
+        var before = deal();
+        moveToFollowup(dealId).then(function(result){
+          if (result && result.status === 'saved'){
+            if (hooks.onDealChanged) hooks.onDealChanged(before, state.deals[dealId]);
+            setMsg('ok', 'Moved to Customer Follow-up.');
+          } else if (result && result.status === 'queued'){
+            setMsg('ok', 'Moving to Customer Follow-up…');
+          } else if (result && result.status !== 'failed'){
+            setMsg('err', 'The stage did not change. The payment is saved.');
+          } else if (result && result.detail){
+            setMsg('err', (result.detail.message || 'The stage did not change.') + ' The payment is saved.');
+          }
+          ctrl.refresh(false);
+        });
+      });
+    }
+    function afterSave(beforeSummary, beforeDeal, okText){
+      var d = deal();
+      if (hooks.onDealChanged) hooks.onDealChanged(beforeDeal, d);
+      ctrl.refresh(false);
+      if (beforeDeal && beforeDeal.stage === 'customer_followup' && d && d.stage === 'job_completed'){
+        var s2 = paymentSummary(d);
+        setMsg('warn', okText + ' Moved back to Job Completed — ' + fmtCents(Math.max(0, s2.balanceCents || 0)) + ' now due.');
+      } else {
+        setMsg('ok', okText);
+      }
+      var gate = canEnterCustomerFollowup(d);
+      ui.prompt = !!(d && d.stage !== 'customer_followup' && gate.ok && !beforeSummary.obligationMet);
+      renderPrompt();
+    }
+
+    // ---- payment / refund / edit form ----
+    function closeForm(){ ui.formOpen = null; var f = $('dm-pay-form'); if (f) f.innerHTML = ''; var a = $('dm-pay-actions'); if (a) a.hidden = false; }
+    function openDetail(p){
+      if (!p) return;
+      if (isPaymentManager() && p.status !== 'Voided') return openForm(p.txnType === 'Refund' ? 'editRefund' : 'edit', p);
+      var f = $('dm-pay-form'); if (!f) return;
+      ui.formOpen = 'view';
+      $('dm-pay-actions').hidden = true;
+      var lines = [
+        ['Type', p.txnType], ['Date', fmtPayDate(p.paymentDate)], ['Amount', (p.txnType === 'Refund' ? '−' : '') + fmtMoneyPrecise(p.amount)],
+        [p.txnType === 'Refund' ? 'Refunded to' : 'Payer', payerLabel(p)]
+      ];
+      if (p.paymentType) lines.push(['Payment type', p.paymentType]);
+      if (p.refundReason) lines.push(['Refund reason', p.refundReason]);
+      if (p.notes) lines.push(['Notes', p.notes]);
+      lines.push(['Status', p.status + (p.voidReason ? ' — ' + p.voidReason : '')]);
+      if (p.voidedBy) lines.push(['Voided by', p.voidedBy]);
+      lines.push(['Entered by', p.createdBy || '']);
+      f.innerHTML = '<div class="pay-form"><div class="pf-title">Transaction details</div>' +
+        lines.map(function(l){ return '<div class="pb-row" style="display:flex;justify-content:space-between;gap:10px;font-size:12.5px;padding:2px 0;"><span style="color:var(--color-text-muted);">'+esc(l[0])+'</span><span style="text-align:right;">'+esc(l[1])+'</span></div>'; }).join('') +
+        (p.status === 'Voided' ? '<div class="pb-note">Voided transactions can’t be changed.</div>' : '<div class="pb-note" style="font-size:11.5px;color:var(--color-text-muted);margin-top:6px;">Only a Manager or Admin can change, void or refund a saved payment.</div>') +
+        '<div class="pay-actions"><button type="button" class="btn btn-ghost btn-sm" id="pf-close">Close</button></div></div>';
+      $('pf-close').addEventListener('click', closeForm);
+    }
+    // mode: 'add' | 'edit' | 'refund' | 'editRefund'
+    function openForm(mode, p, original){
+      var f = $('dm-pay-form'); if (!f) return;
+      var d = deal(); if (!d) return;
+      ui.formOpen = mode;
+      $('dm-pay-actions').hidden = true;
+      setMsg(null, null);
+      var isRefund = mode === 'refund' || mode === 'editRefund';
+      var isEdit = mode === 'edit' || mode === 'editRefund';
+      var orig = original || (isRefund && p ? state.payments[p.relatedPaymentId] : null);
+      var pendingId = isEdit ? p.id : 'pay-' + uid().slice(3);   // stable for every retry of this entry
+      var expectedVersion = isEdit ? (p._version || 0) : 0;
+      var remaining = orig ? refundRemaining(orig, isEdit ? p.id : null) : 0;
+      var init = isEdit ? p : {
+        paymentDate: localDateKey(),
+        amount: isRefund ? (remaining > 0 ? (remaining / 100).toFixed(2) : '') : '',
+        payer: isRefund && orig && orig.payer !== 'Not recorded' ? orig.payer : '',
+        otherPayer: isRefund && orig && orig.payer === 'Other' ? (orig.otherPayer || '') : ''
+      };
+      var payer = init.payer || '';
+      var keepsNotRecorded = isEdit && p.origin === 'Migrated' && p.payer === 'Not recorded';
+      var title = mode === 'add' ? 'Add payment' : mode === 'refund' ? 'Record refund' : mode === 'edit' ? 'Edit payment' : 'Edit refund';
+      var head = isRefund && orig ? '<div class="pb-note" style="margin:-4px 0 8px;font-size:12px;color:var(--color-text-muted);">Refund of '+esc(fmtPayDate(orig.paymentDate))+' payment — '+esc(fmtMoneyPrecise(orig.amount))+' from '+esc(payerLabel(orig))+'. Refundable remaining: <strong>'+esc(fmtCents(remaining))+'</strong>.</div>' : '';
+      f.innerHTML = '<div class="pay-form">' +
+        '<div class="pf-title">'+title+'</div>' + head +
+        '<div class="form-grid">' +
+          '<div class="form-field"><label for="pf-date">'+(isRefund ? 'Refund date' : 'Payment date')+'</label><input id="pf-date" form="pf-detached" type="date" max="'+localDateKey()+'" value="'+esc(init.paymentDate||'')+'"><div class="date-menus" id="pf-date-menus"></div></div>' +
+          '<div class="form-field"><label for="pf-amount">Amount ($)</label><input id="pf-amount" form="pf-detached" type="number" inputmode="decimal" min="0.01" step="0.01" value="'+esc(init.amount == null ? '' : init.amount)+'"></div>' +
+          '<div class="form-field full"><label>'+(isRefund ? 'Refunded to' : 'Payer')+'</label><div class="payer-toggle" id="pf-payer">' +
+            PAY_PAYERS.map(function(x){ return '<button type="button" data-payer="'+x+'"'+(payer === x ? ' class="on"' : '')+'>'+x+'</button>'; }).join('') + '</div>' +
+            (keepsNotRecorded ? '<div class="pb-note" style="font-size:11.5px;color:var(--color-text-muted);margin-top:4px;">Payer: Not recorded (migrated). Choose the actual payer to correct it, or leave as is.</div>' : '') +
+            (isRefund ? '<div class="pb-note" style="font-size:11.5px;color:var(--color-text-muted);margin-top:4px;">Who is receiving this refund. It stays linked to the original payment.</div>' : '') + '</div>' +
+          '<div class="form-field full" id="pf-other-wrap"'+(payer === 'Other' ? '' : ' hidden')+'><label for="pf-other">'+(isRefund ? 'Other recipient' : 'Other payer')+'</label><input id="pf-other" form="pf-detached" value="'+esc(init.otherPayer||'')+'" placeholder="e.g. ABC Fleet Services"></div>' +
+          (isRefund
+            ? '<div class="form-field full"><label for="pf-reason">Refund reason</label><select id="pf-reason"><option value="">Choose a reason</option>'+PAY_REFUND_REASONS.map(function(r){ return '<option value="'+esc(r)+'"'+(init.refundReason === r ? ' selected' : '')+'>'+esc(r)+'</option>'; }).join('')+'</select></div>'
+            : '<div class="form-field full"><label for="pf-type">Payment type (optional)</label><select id="pf-type"><option value="">Not set</option>'+PAY_TYPES.map(function(t){ return '<option value="'+esc(t)+'"'+(init.paymentType === t ? ' selected' : '')+'>'+esc(t)+'</option>'; }).join('')+'</select></div>') +
+          '<div class="form-field full"><label for="pf-notes" id="pf-notes-label">'+(isRefund ? 'Explanation (required when the reason is Other)' : 'Notes (optional)')+'</label><textarea id="pf-notes" style="min-height:44px;">'+esc(init.notes||'')+'</textarea></div>' +
+        '</div>' +
+        '<div id="pf-warn"></div><div id="pf-err"></div>' +
+        '<div class="pay-actions" id="pf-buttons">' +
+          '<button type="button" class="btn btn-primary btn-sm" id="pf-save">'+(isEdit ? 'Save changes' : (isRefund ? 'Save refund' : 'Save payment'))+'</button>' +
+          '<button type="button" class="btn btn-ghost btn-sm" id="pf-cancel">Cancel</button>' +
+          (mode === 'edit' && refundRemaining(p, null) > 0 ? '<button type="button" class="btn btn-ghost btn-sm" id="pf-refund">Refund</button>' : '') +
+          (isEdit ? '<button type="button" class="btn btn-danger btn-sm" id="pf-void">'+(isRefund ? 'Void refund' : 'Void payment')+'</button>' : '') +
+        '</div><div id="pf-void-box"></div></div>';
+      attachDateMenus($('pf-date'), $('pf-date-menus'));
+      // Enter in these inputs must never submit the opportunity form.
+      Array.prototype.forEach.call(f.querySelectorAll('input'), function(inp){ inp.addEventListener('keydown', function(e){ if (e.key === 'Enter') e.preventDefault(); }); });
+      Array.prototype.forEach.call(f.querySelectorAll('#pf-payer button'), function(b){
+        b.addEventListener('click', function(){
+          payer = b.getAttribute('data-payer');
+          Array.prototype.forEach.call(f.querySelectorAll('#pf-payer button'), function(x){ x.classList.toggle('on', x === b); });
+          $('pf-other-wrap').hidden = payer !== 'Other';
+          syncSaveEnabled();
+        });
+      });
+      // "Save" stays disabled while Other is chosen with no name (the server
+      // rejects it too).
+      function syncSaveEnabled(){ var b = $('pf-save'); if (b && !b.classList.contains('is-busy')) b.disabled = payer === 'Other' && !$('pf-other').value.trim(); }
+      $('pf-other').addEventListener('input', syncSaveEnabled);
+      syncSaveEnabled();
+      var overpayAck = false;
+      function err(t){ $('pf-err').innerHTML = t ? '<div class="pay-err">'+esc(t)+'</div>' : ''; }
+      function warn(html){ $('pf-warn').innerHTML = html || ''; }
+      $('pf-cancel').addEventListener('click', closeForm);
+      if ($('pf-refund')) $('pf-refund').addEventListener('click', function(){ openForm('refund', null, p); });
+      if ($('pf-void')) $('pf-void').addEventListener('click', function(){ openVoid(p); });
+      Array.prototype.forEach.call(f.querySelectorAll('input,select,textarea'), function(x){ x.addEventListener('input', function(){ overpayAck = false; warn(''); }); });
+
+      async function submit(){
+        err(''); 
+        var date = $('pf-date').value;
+        var amountRaw = $('pf-amount').value;
+        var amount = payCents(amountRaw) / 100;
+        var other = $('pf-other').value.trim();
+        var notes = $('pf-notes').value;
+        var effectivePayer = payer || (keepsNotRecorded ? 'Not recorded' : '');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !parseDateOnlyLocal(date)) return err('Enter the ' + (isRefund ? 'refund' : 'payment') + ' date.');
+        if (date > localDateKey()) return err('The date can’t be in the future.');
+        if (amountRaw === '' || !isFinite(Number(amountRaw)) || payCents(amountRaw) <= 0) return err('Enter an amount greater than $0.');
+        if (!effectivePayer) return err(isRefund ? 'Choose who is receiving the refund.' : 'Choose who paid: Customer, Insurance or Other.');
+        if (effectivePayer === 'Other' && !other) return err(isRefund ? 'Enter who is receiving the refund.' : 'Enter who paid.');
+        var reason = isRefund ? $('pf-reason').value : '';
+        if (isRefund && !reason) return err('Choose a refund reason.');
+        if (isRefund && reason === 'Other' && !notes.trim()) return err('Explain the refund when the reason is Other.');
+        if (isRefund && orig && date < orig.paymentDate) return err('A refund can’t be dated before the original payment (' + fmtPayDate(orig.paymentDate) + ').');
+        if (isRefund && orig && payCents(amount) > refundRemaining(orig, isEdit ? p.id : null)) return err('The maximum additional refund on this payment is ' + fmtCents(refundRemaining(orig, isEdit ? p.id : null)) + '.');
+        var full = { paymentDate: date, amount: amount, payer: effectivePayer, otherPayer: effectivePayer === 'Other' ? other : '', notes: notes };
+        if (isRefund) full.refundReason = reason; else full.paymentType = $('pf-type').value;
+        var data;
+        if (isEdit){
+          data = {};
+          Object.keys(full).forEach(function(k){ if (String(full[k] == null ? '' : full[k]) !== String(p[k] == null ? '' : p[k])) data[k] = full[k]; });
+          if (!Object.keys(data).length){ closeForm(); return; }
+        } else {
+          data = Object.assign({ dealId: dealId, txnType: isRefund ? 'Refund' : 'Payment' }, full);
+          if (isRefund) data.relatedPaymentId = orig.id;
+        }
+        var d0 = deal();
+        var before = paymentSummary(d0);
+        // D5 warn-but-allow: confirm BEFORE anything is sent.
+        if (!isRefund && !overpayAck){
+          var rows = paymentsForDeal(dealId).filter(function(x){ return x.id !== pendingId; }).concat([Object.assign({}, isEdit ? p : {}, full, { id: pendingId, txnType:'Payment', status:'Active', dealId: dealId })]);
+          var after = paymentSummary(d0, rows);
+          if (after.basisCents != null && after.balanceCents < 0 && after.paidCents > before.paidCents){
+            warn('<div class="pay-warn">This payment exceeds the remaining balance by <strong>'+fmtCents(-after.balanceCents)+'</strong>. Total paid will be '+fmtCents(after.paidCents)+' on a '+fmtCents(after.basisCents)+' '+(after.basisKind === 'invoice' ? 'invoice' : 'quote (estimated)')+' (Overpaid).' +
+              '<div class="pay-actions"><button type="button" class="btn btn-primary btn-sm" id="pf-ack">Record anyway</button><button type="button" class="btn btn-ghost btn-sm" id="pf-change">Change amount</button></div></div>');
+            $('pf-ack').addEventListener('click', function(){ overpayAck = true; warn(''); submit(); });
+            $('pf-change').addEventListener('click', function(){ warn(''); $('pf-amount').focus(); });
+            return;
+          }
+        }
+        var saveBtn = $('pf-save');
+        setSubmitBusy(saveBtn, true);
+        var result = await savePayment(pendingId, data, expectedVersion, { overpaymentConfirmed: overpayAck });
+        if (!document.getElementById('pf-save')) return;   // form closed meanwhile
+        setSubmitBusy(saveBtn, false);
+        if (result.status === 'saved'){
+          closeForm();
+          afterSave(before, d0, isEdit ? 'Changes saved.' : (isRefund ? 'Refund saved.' : 'Payment saved.'));
+        } else if (result.status === 'conflict'){
+          closeForm(); ctrl.refresh(false);
+          setMsg('err', 'Someone else changed this payment while you were editing. The latest version is shown — review it and try again.');
+        } else if (result.error === 'overpayment_unconfirmed' && result.detail){
+          var dt = result.detail;
+          warn('<div class="pay-warn">This payment exceeds the remaining balance by <strong>'+fmtMoneyPrecise(dt.overBy)+'</strong>. Total paid will be '+fmtMoneyPrecise(dt.totalPaidAfter)+' on a '+fmtMoneyPrecise(dt.basis)+' '+(dt.basisKind === 'invoice' ? 'invoice' : 'quote (estimated)')+' (Overpaid).' +
+            '<div class="pay-actions"><button type="button" class="btn btn-primary btn-sm" id="pf-ack">Record anyway</button><button type="button" class="btn btn-ghost btn-sm" id="pf-change">Change amount</button></div></div>');
+          $('pf-ack').addEventListener('click', function(){ overpayAck = true; warn(''); submit(); });
+          $('pf-change').addEventListener('click', function(){ warn(''); $('pf-amount').focus(); });
+        } else {
+          ctrl.refresh(false);
+          err((result.error ? paymentErrorText(result.error, result.detail) : 'Not saved — check your connection and click Save again. Nothing you’ve entered has been lost.'));
+        }
+      }
+      $('pf-save').addEventListener('click', submit);
+      ctrl.submitForm = submit;   // used by tests and keyboard users
+    }
+    function openVoid(p){
+      var box = $('pf-void-box'); if (!box) return;
+      if (p.txnType === 'Payment' && paymentsForDeal(dealId).some(function(r){ return r.txnType === 'Refund' && r.status === 'Active' && String(r.relatedPaymentId) === String(p.id); })){
+        box.innerHTML = '<div class="pay-err">This payment has refunds. Void its refunds first.</div>'; return;
+      }
+      var d0 = deal();
+      var before = paymentSummary(d0);
+      var after = paymentSummary(d0, paymentsForDeal(dealId).map(function(x){ return x.id === p.id ? Object.assign({}, x, { status:'Voided' }) : x; }));
+      var dt = parseDateOnlyLocal(p.paymentDate);
+      var monthLabel = dt ? dt.toLocaleDateString('en-US', { month:'long', year:'numeric' }) : '';
+      box.innerHTML = '<div class="pay-warn">Void this ' + (p.txnType === 'Refund' ? 'refund' : 'payment') + '? Total paid ' + fmtCents(before.paidCents) + ' → ' + fmtCents(after.paidCents) + '; ' + monthLabel + ' payments received ' + (p.txnType === 'Refund' ? '+' : '−') + fmtMoneyPrecise(p.amount) + '. The transaction is kept and marked Voided.' +
+        '<div class="form-field full" style="margin-top:8px;"><label for="pf-void-reason">Reason (optional)</label><input id="pf-void-reason" form="pf-detached"></div>' +
+        '<div class="pay-actions"><button type="button" class="btn btn-danger btn-sm" id="pf-void-go">Void</button><button type="button" class="btn btn-ghost btn-sm" id="pf-void-cancel">Cancel</button></div></div>';
+      $('pf-void-reason').addEventListener('keydown', function(e){ if (e.key === 'Enter') e.preventDefault(); });
+      $('pf-void-cancel').addEventListener('click', function(){ box.innerHTML = ''; });
+      $('pf-void-go').addEventListener('click', async function(){
+        var btn = $('pf-void-go');
+        setSubmitBusy(btn, true);
+        var result = await savePayment(p.id, { status:'Voided', voidReason: $('pf-void-reason').value }, p._version || 0);
+        if (!document.getElementById('pf-void-go')) return;
+        setSubmitBusy(btn, false);
+        if (result.status === 'saved'){ closeForm(); afterSave(before, d0, (p.txnType === 'Refund' ? 'Refund' : 'Payment') + ' voided.'); }
+        else if (result.status === 'conflict'){ closeForm(); ctrl.refresh(false); setMsg('err', 'Someone else changed this payment. The latest version is shown — review it and try again.'); }
+        else box.innerHTML = '<div class="pay-err">'+esc(result.error ? paymentErrorText(result.error, result.detail) : 'Not saved — check your connection and try again.')+'</div>';
+      });
+    }
+    ctrl.openForm = openForm;
+    ctrl.openDetail = openDetail;
+    var addBtn = $('dm-add-payment');
+    if (addBtn) addBtn.addEventListener('click', function(){ openForm('add'); });
+    ctrl.refresh(false);
+    state.openBilling = ctrl;
+    return ctrl;
+  }
+  // Remaining Refundable Amount (FD9), cents: original payment minus its
+  // ACTIVE refunds, excluding the refund being edited.
+  function refundRemaining(orig, excludeRefundId){
+    if (!orig) return 0;
+    var used = 0;
+    paymentsForDeal(orig.dealId).forEach(function(r){
+      if (r.txnType !== 'Refund' || r.status !== 'Active' || String(r.relatedPaymentId) !== String(orig.id)) return;
+      if (excludeRefundId && String(r.id) === String(excludeRefundId)) return;
+      used += payCents(r.amount);
+    });
+    return payCents(orig.amount) - used;
+  }
+
   function openDealModal(dealId){
     state.openDealModalId = dealId || null;
     var editing = dealId ? state.deals[dealId] : null;
@@ -4419,7 +5073,7 @@
           '<div class="form-field"><label for="dm-amount">Quote amount ($)</label><input id="dm-amount" type="number" min="0" step="0.01" value="'+(editing && editing.quoteAmount ? editing.quoteAmount : '')+'"></div>' +
           '<div class="form-field"><label for="dm-jobtype">Job type</label><select id="dm-jobtype">'+JOB_TYPES.map(function(j){ return '<option value="'+j.id+'"'+(editing && editing.jobType===j.id ? ' selected':'')+'>'+esc(j.label)+'</option>'; }).join('')+'</select></div>' +
           '<div class="form-field"><label for="dm-caltype">Calibration type</label><select id="dm-caltype">'+CALIBRATION_TYPES.map(function(c){ return '<option value="'+c.id+'"'+(editing && editing.calibrationType===c.id ? ' selected':'')+'>'+esc(c.label)+'</option>'; }).join('')+'</select></div>' +
-          '<div class="form-field"><label for="dm-stage">Stage</label><select id="dm-stage">'+STAGES.map(function(s){ return '<option value="'+s.id+'"'+(editing && editing.stage===s.id ? ' selected' : '')+'>'+esc(s.label)+'</option>'; }).join('')+'</select></div>' +
+          '<div class="form-field"><label for="dm-stage">Stage</label><select id="dm-stage">'+STAGES.map(function(s){ return '<option value="'+s.id+'"'+(editing && editing.stage===s.id ? ' selected' : '')+'>'+esc(s.label)+'</option>'; }).join('')+'</select><div class="stage-note" id="dm-stage-note" hidden></div></div>' +
           '<div class="form-field"><label for="dm-source">Referral source</label><select id="dm-source"><option value="">Not set</option>'+SOURCES.map(function(s){ return '<option value="'+esc(s)+'"'+(editing && editing.source===s ? ' selected':'')+'>'+esc(s)+'</option>'; }).join('')+'</select></div>' +
           '<div class="form-field"><label for="dm-assigned">Assigned to</label><input id="dm-assigned" value="'+esc(editing ? editing.assignedTo : '')+'"></div>' +
           '<div class="form-field"><label for="dm-scheduled">Scheduled date</label><input id="dm-scheduled" type="date" value="'+esc(editing ? editing.scheduledDate : '')+'"><div class="date-menus" id="dm-scheduled-menus"></div></div>' +
@@ -4433,17 +5087,19 @@
             '<div class="form-field"><label for="dm-ins-adjphone">Adjuster phone</label><input id="dm-ins-adjphone" value="'+esc(editing ? editing.adjusterPhone : '')+'"></div>' +
             '<div class="form-field"><label for="dm-ins-auth">Approval status</label><select id="dm-ins-auth">'+INSURANCE_STATUSES.map(function(s){ return '<option value="'+s.id+'"'+(editing && editing.insuranceAuthorized===s.id ? ' selected':'')+'>'+esc(s.label)+'</option>'; }).join('')+'</select></div>' +
           '</div></details>' +
-          '<details class="form-section"><summary>Billing &amp; payment</summary><div class="form-grid">' +
-            '<div class="form-field"><label for="dm-finalinvoice">Final invoice ($)</label><input id="dm-finalinvoice" type="number" min="0" step="0.01" placeholder="Defaults to quote amount" value="'+(editing && editing.finalInvoice ? editing.finalInvoice : '')+'"></div>' +
-            '<div class="form-field"><label for="dm-amountpaid">Amount paid ($)</label><input id="dm-amountpaid" type="number" min="0" step="0.01" value="'+(editing && editing.amountPaid ? editing.amountPaid : '')+'"></div>' +
-            // Payment received date: the day the money actually arrived.
-            // Revenue is credited to this date. Required (and defaulted to
-            // today) when the opportunity is in Payment received / Customer
-            // follow-up; can't be in the future.
-            '<div class="form-field"><label for="dm-paymentdate">Payment received date</label><input id="dm-paymentdate" type="date" max="'+localDateKey()+'" value="'+esc(editing ? (editing.paymentReceivedDate||'') : '')+'"><div class="date-menus" id="dm-paymentdate-menus"></div></div>' +
-            ((editing && isRealized(editing.stage) && !editing.paymentReceivedDate) ? '<div class="form-field full" id="dm-paymentdate-legacy" style="font-size:12px;color:var(--color-text-muted);margin-top:-6px;">Payment date not recorded. Revenue is currently credited to the date this was marked paid in the CRM'+(editing.closedAt ? ' ('+esc(new Date(editing.closedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}))+')' : '')+'. Enter the actual date to correct it.</div>' : '') +
-            (editing ? '<div class="form-field full" style="font-size:12.5px;color:var(--color-text-muted);">Balance due: <strong style="color:var(--color-text);">'+fmtMoneyPrecise(Math.max(0, Number(editing.finalInvoice||editing.quoteAmount||0) - Number(editing.amountPaid||0)))+'</strong></div>' : '') +
-          '</div></details>' +
+          // Billing & payment (Phase 2): Final Invoice stays a form field; the
+          // money received lives in the Payments ledger below (Total Paid is
+          // calculated, never typed). Legacy amountPaid is no longer edited here.
+          '<details class="form-section" id="dm-billing"><summary>Billing &amp; payment</summary><div class="form-grid">' +
+            '<div class="form-field"><label for="dm-finalinvoice">Final invoice ($)</label><input id="dm-finalinvoice" type="number" min="0" step="0.01" placeholder="Not entered yet" value="'+(editing && editing.finalInvoice !== null && editing.finalInvoice !== undefined && editing.finalInvoice !== '' && isFinite(Number(editing.finalInvoice)) ? Number(editing.finalInvoice) : '')+'"></div>' +
+            '<div class="form-field full" id="dm-zero-box"></div>' +
+            '<div class="form-field full" id="dm-invoice-confirm"></div>' +
+          '</div>' +
+          (editing
+            ? '<div id="dm-pay-summary" class="pay-box"></div><div id="dm-pay-prompt"></div><div id="dm-pay-msg"></div><div id="dm-pay-history"></div><div id="dm-pay-form"></div>' +
+              '<div class="pay-actions" id="dm-pay-actions"><button type="button" class="btn btn-ghost btn-sm" id="dm-add-payment">+ Add payment</button></div>'
+            : '<div class="page-sub" style="margin:0 0 8px;">Save the opportunity first to record payments.</div>') +
+          '</details>' +
           '<details class="form-section"><summary>Photos &amp; documents</summary>' +
             (editing ?
               '<div id="dm-attach-list">'+structuredAttachments.map(function(a){
@@ -4475,24 +5131,141 @@
     backdrop.hidden = false;
     document.getElementById('dm-close').addEventListener('click', closeModal);
     attachDateMenus(document.getElementById('dm-scheduled'), document.getElementById('dm-scheduled-menus'), { yearsAhead: 2, yearsBack: 1 });
-    (function(){
-      var stSel = document.getElementById('dm-stage'), pay = document.getElementById('dm-paymentdate');
-      if (!stSel || !pay) return;
-      attachDateMenus(pay, document.getElementById('dm-paymentdate-menus'));
-      stSel.addEventListener('change', function(){
-        if (isRealized(stSel.value) && !pay.value){
-          pay.value = localDateKey();
-          if (pay._syncDateMenus) pay._syncDateMenus();
-          var det = pay.closest('details'); if (det) det.open = true;
+    // ---- Billing & payment wiring (Phase 2) ----
+    var stSel = document.getElementById('dm-stage');
+    var fiInput = document.getElementById('dm-finalinvoice');
+    var billingDetails = document.getElementById('dm-billing');
+    var stagePrev = stSel.value;
+    var zeroTouched = false;          // the user typed into Final Invoice in this form
+    var zeroConfirmAt = null;         // set by "Confirm no charge" in this form
+    var zeroLegacyDismissed = false;
+    var invoiceOverAck = false;       // FD4 confirmation given in this form
+    // The Final Invoice / no-charge values this form would save.
+    function formInvoiceFields(){
+      var raw = fiInput.value;
+      var fi = raw === '' ? null : Number(raw);
+      var z = '';
+      if (fi === 0){
+        if (zeroConfirmAt) z = zeroConfirmAt;
+        else if (editing && Number(editing.finalInvoice) === 0 && editing.finalInvoice !== null && editing.finalInvoice !== '' && editing.zeroInvoiceConfirmedAt) z = editing.zeroInvoiceConfirmedAt;
+      }
+      return { finalInvoice: fi, zeroInvoiceConfirmedAt: z };
+    }
+    function renderZeroBox(){
+      var box = document.getElementById('dm-zero-box'); if (!box) return;
+      var f = formInvoiceFields();
+      if (f.finalInvoice !== 0){ box.innerHTML = ''; return; }
+      if (f.zeroInvoiceConfirmedAt){
+        box.innerHTML = '<div class="pb-note" style="font-size:12px;color:var(--color-text-muted);">No charge confirmed &mdash; $0.00 Final Invoice (No Payment Required).</div>';
+        return;
+      }
+      if (!zeroTouched && zeroLegacyDismissed){ box.innerHTML = '<div class="pb-note" style="font-size:12px;color:var(--color-text-muted);">$0 not confirmed &mdash; treated as no Final Invoice.</div>'; return; }
+      var legacy = !zeroTouched;
+      box.innerHTML = '<div class="pay-warn" id="dm-zero-confirm">' + (legacy
+          ? 'This $0.00 Final Invoice was never confirmed, so it is treated as not entered. Record a $0.00 Final Invoice \u2014 a no-charge job (warranty, goodwill, rework, fully discounted)?'
+          : 'Record a $0.00 Final Invoice \u2014 a no-charge job (warranty, goodwill, rework, fully discounted)?') +
+        '<div class="pay-actions"><button type="button" class="btn btn-primary btn-sm" id="dm-zero-yes">Confirm no-charge</button><button type="button" class="btn btn-ghost btn-sm" id="dm-zero-no">Cancel</button></div></div>';
+      document.getElementById('dm-zero-yes').addEventListener('click', function(){ zeroConfirmAt = nowIso(); renderZeroBox(); renderStageNote(); setModalStatus(null, null); });
+      document.getElementById('dm-zero-no').addEventListener('click', function(){
+        if (legacy){ zeroLegacyDismissed = true; }
+        else {
+          var prev = editing && editing.finalInvoice !== null && editing.finalInvoice !== undefined && editing.finalInvoice !== '' ? Number(editing.finalInvoice) : '';
+          fiInput.value = prev === 0 ? '0' : (prev === '' ? '' : String(prev));
+          zeroTouched = false;
+        }
+        renderZeroBox(); renderStageNote(); setModalStatus(null, null);
+      });
+    }
+    // Stage note: Customer Follow-up block message, or the Payment Received
+    // balance (shown, never blocking).
+    function renderStageNote(blockMsg){
+      var n = document.getElementById('dm-stage-note'); if (!n) return;
+      if (blockMsg){ n.hidden = false; n.className = 'stage-note block'; n.textContent = blockMsg; return; }
+      n.className = 'stage-note';
+      if (editing && stSel.value === 'payment_received'){
+        var s = paymentSummary(Object.assign({}, editing, formInvoiceFields()));
+        n.hidden = false;
+        if (s.legacyNotItemized) n.textContent = 'Payment Received \u00b7 Not itemized (legacy) \u2014 no balance can be shown until the legacy amount is reconciled';
+        else if (s.basisKind === 'invoice') n.textContent = 'Payment Received · Balance Due: ' + fmtCents(Math.max(0, s.balanceCents));
+        else if (s.basisKind === 'quote') n.textContent = 'Payment Received · Estimated balance: ' + fmtCents(Math.max(0, s.balanceCents));
+        else n.textContent = 'Payment Received · Balance unknown (no Final Invoice or Quote)';
+        return;
+      }
+      n.hidden = true; n.textContent = '';
+    }
+    // The Customer Follow-up gate for what this form would save (FD2: hard
+    // gate, no override). Includes the Final Invoice autofill a move into a
+    // paid stage applies.
+    function formFollowupGate(){
+      if (!editing) return canEnterCustomerFollowup(null);
+      var fin = formInvoiceFields();
+      if (!isRealized(editing.stage) && !isAuthoritativeInvoice(Object.assign({}, editing, fin)) && Number(document.getElementById('dm-amount').value) > 0) fin.finalInvoice = Number(document.getElementById('dm-amount').value);
+      return canEnterCustomerFollowup(editing, fin);
+    }
+    // FD4 confirmation, inline in Billing & payment. Continue re-submits
+    // the form with the confirmation; Cancel sends nothing.
+    function showInvoiceOverpayConfirm(paidC, invC, overC){
+      var box = document.getElementById('dm-invoice-confirm'); if (!box) return;
+      if (billingDetails) billingDetails.open = true;
+      box.innerHTML = '<div class="pay-warn" id="dm-inv-over">Total payments received (' + fmtCents(paidC) + ') exceed this Final Invoice (' + fmtCents(invC) + ') by <strong>' + fmtCents(overC) + '</strong>. Saving this invoice will result in an overpaid balance. Do you want to continue?' +
+        '<div class="pay-actions"><button type="button" class="btn btn-primary btn-sm" id="dm-inv-over-yes">Continue</button><button type="button" class="btn btn-ghost btn-sm" id="dm-inv-over-no">Cancel</button></div></div>';
+      setModalStatus('failed', 'Confirm the Final Invoice change in Billing & payment.');
+      document.getElementById('dm-inv-over-no').addEventListener('click', function(){ box.innerHTML = ''; setModalStatus(null, null); fiInput.focus(); fiInput.select && fiInput.select(); });
+      document.getElementById('dm-inv-over-yes').addEventListener('click', function(){
+        invoiceOverAck = true; box.innerHTML = ''; setModalStatus(null, null);
+        var f = document.getElementById('deal-form');
+        if (f.requestSubmit) f.requestSubmit(); else f.dispatchEvent(new Event('submit', { cancelable:true }));
+      });
+    }
+    stSel.addEventListener('change', function(){
+      if (stSel.value === 'customer_followup' && (!editing || editing.stage !== 'customer_followup')){
+        var gate = formFollowupGate();
+        if (!gate.ok){
+          stSel.value = stagePrev;
+          renderStageNote(gate.message);
+          return;
+        }
+      }
+      stagePrev = stSel.value;
+      renderStageNote();
+    });
+    fiInput.addEventListener('input', function(){
+      zeroTouched = true; zeroConfirmAt = null; invoiceOverAck = false;
+      var c = document.getElementById('dm-invoice-confirm'); if (c) c.innerHTML = '';
+      renderZeroBox(); renderStageNote();
+    });
+    document.getElementById('dm-amount').addEventListener('input', function(){
+      invoiceOverAck = false;
+      var c = document.getElementById('dm-invoice-confirm'); if (c) c.innerHTML = '';
+      renderStageNote();
+    });
+    renderZeroBox();
+    renderStageNote();
+    if (editing){
+      mountBilling(dealId, {
+        getDeal: function(){ return state.deals[dealId]; },
+        // A payment save can change the opportunity (C1 date, or the D20 move
+        // back). Keep this form's view of it current so a later Save changes
+        // never re-applies the old stage.
+        onDealChanged: function(prev, next){
+          if (!next) return;
+          if (prev && next.stage !== prev.stage && stSel.value === prev.stage){ stSel.value = next.stage; stagePrev = next.stage; }
+          editing = next;
+          renderStageNote();
+        },
+        // A background refresh (another user, or a queued move) can change
+        // the saved stage while this form is open: follow it, so Save changes
+        // never re-applies the old stage.
+        onSummary: function(){
+          var cur = state.deals[dealId];
+          if (cur && editing && cur.stage !== editing.stage){
+            if (stSel.value === editing.stage){ stSel.value = cur.stage; stagePrev = cur.stage; }
+            editing = cur;
+          }
+          renderStageNote();
         }
       });
-      // The browser's own date limit (max = today) can stop the save before
-      // the CRM's check runs — show the same clear message and reveal the field.
-      pay.addEventListener('invalid', function(){
-        var det = pay.closest('details'); if (det) det.open = true;
-        setModalStatus('failed', 'The payment received date can\u2019t be in the future. Enter the date the money was actually received.');
-      });
-    })();
+    }
     document.getElementById('dm-cancel').addEventListener('click', closeModal);
     // Duplicate-prevention state for the NEW-opportunity path only.
     // pinnedContactId: a specific Contact the user picked from the
@@ -4617,27 +5390,30 @@
       var adjusterPhone = document.getElementById('dm-ins-adjphone').value.trim();
       var insuranceAuthorized = document.getElementById('dm-ins-auth').value;
       var finalInvoiceRaw = document.getElementById('dm-finalinvoice').value;
-      var amountPaidRaw = document.getElementById('dm-amountpaid').value;
-      var payDateRaw = (document.getElementById('dm-paymentdate') || { value:'' }).value;
+      if (editing && state.deals[dealId]) editing = state.deals[dealId];   // latest saved copy (payments may have changed it)
       var attachmentLinks = document.getElementById('dm-attachments').value.trim();
       var notes = document.getElementById('dm-notes').value.trim();
 
-      var common = { title:title, vehicle:vehicle, licensePlate:licensePlate, quoteAmount: amount ? Number(amount) : null, jobType:jobType, calibrationType:calibrationType, stage:stage, source:source, assignedTo:assignedTo, scheduledDate:scheduledDate, scheduledTime:scheduledTime, partsStatus:partsStatus, lostReason:lostReason, insuranceCarrier:insuranceCarrier, claimNumber:claimNumber, adjusterName:adjusterName, adjusterPhone:adjusterPhone, insuranceAuthorized:insuranceAuthorized, finalInvoice: finalInvoiceRaw ? Number(finalInvoiceRaw) : null, amountPaid: amountPaidRaw ? Number(amountPaidRaw) : 0, attachmentLinks:attachmentLinks, notes:notes, updatedAt: nowIso() };
+      var common = { title:title, vehicle:vehicle, licensePlate:licensePlate, quoteAmount: amount ? Number(amount) : null, jobType:jobType, calibrationType:calibrationType, stage:stage, source:source, assignedTo:assignedTo, scheduledDate:scheduledDate, scheduledTime:scheduledTime, partsStatus:partsStatus, lostReason:lostReason, insuranceCarrier:insuranceCarrier, claimNumber:claimNumber, adjusterName:adjusterName, adjusterPhone:adjusterPhone, insuranceAuthorized:insuranceAuthorized, finalInvoice: finalInvoiceRaw === '' ? null : Number(finalInvoiceRaw), attachmentLinks:attachmentLinks, notes:notes, updatedAt: nowIso() };
 
-      // Payment received date rules (see the Billing & payment field).
-      if (isRealized(stage)){
-        var hadPayDate = !!(editing && editing.paymentReceivedDate);
-        var newlyPaid = !editing || !isRealized(editing.stage);
-        if (payDateRaw && payDateRaw > localDateKey()){
-          var detF = document.getElementById('dm-paymentdate').closest('details'); if (detF) detF.open = true;
-          setModalStatus('failed', 'The payment received date can\u2019t be in the future. Enter the date the money was actually received.');
-          return;
-        }
-        if (!payDateRaw && (newlyPaid || hadPayDate)){
-          var detB = document.getElementById('dm-paymentdate').closest('details'); if (detB) detB.open = true;
-          setModalStatus('failed', 'Enter the payment received date (Billing & payment) \u2014 revenue is credited to that date.');
-          return;
-        }
+      // Z0: a newly typed $0 Final Invoice must be confirmed as no charge.
+      var invFields = formInvoiceFields();
+      if (invFields.finalInvoice === 0 && !invFields.zeroInvoiceConfirmedAt && zeroTouched){
+        if (billingDetails) billingDetails.open = true;
+        setModalStatus('failed', 'Confirm the $0.00 Final Invoice as no charge (Billing & payment), or clear it.');
+        return;
+      }
+      if (editing){
+        if (invFields.zeroInvoiceConfirmedAt && invFields.zeroInvoiceConfirmedAt !== (editing.zeroInvoiceConfirmedAt || '')) common.zeroInvoiceConfirmedAt = invFields.zeroInvoiceConfirmedAt;
+        else if (!invFields.zeroInvoiceConfirmedAt && editing.zeroInvoiceConfirmedAt) common.zeroInvoiceConfirmedAt = '';
+      } else if (invFields.zeroInvoiceConfirmedAt){
+        common.zeroInvoiceConfirmedAt = invFields.zeroInvoiceConfirmedAt;
+      }
+      // FD2: Customer Follow-up only after the job is completed and paid in
+      // full. A new opportunity can't start there (no completed job yet).
+      if (stage === 'customer_followup' && (!editing || editing.stage !== 'customer_followup')){
+        var fGate = formFollowupGate();
+        if (!fGate.ok){ renderStageNote(fGate.message); setModalStatus('failed', fGate.message); return; }
       }
       if (editing){
         if (editing.stage !== stage){
@@ -4659,12 +5435,13 @@
           if (isRealized(stage)){
             if (!isRealized(editing.stage)){
               common.closedAt = nowIso();
-              var invoiceBase = editing.finalInvoice || editing.quoteAmount || common.finalInvoice || common.quoteAmount || 0;
-              if (!common.finalInvoice) common.finalInvoice = invoiceBase;
-              // amountPaid is deliberately NOT auto-populated here — same
-              // reasoning as stageTransitionPatch above. Whatever the user
-              // actually typed in the Amount Paid field (including leaving
-              // it at $0) is what gets saved.
+              // Final Invoice defaults to the Quote only when no authoritative
+              // invoice exists (Z0: a confirmed $0 is kept). amountPaid is
+              // never written here — Total Paid comes from the ledger.
+              if (!isAuthoritativeInvoice(Object.assign({}, editing, { finalInvoice: common.finalInvoice, zeroInvoiceConfirmedAt: common.hasOwnProperty('zeroInvoiceConfirmedAt') ? common.zeroInvoiceConfirmedAt : editing.zeroInvoiceConfirmedAt })) && Number(common.quoteAmount) > 0){
+                common.finalInvoice = Number(common.quoteAmount);
+                if (common.zeroInvoiceConfirmedAt) common.zeroInvoiceConfirmedAt = '';
+              }
             }
           } else if (stage === 'closed_lost'){
             common.closedAt = nowIso();
@@ -4673,18 +5450,52 @@
           }
           if (stage !== 'closed_lost') common.lostReason = '';
         }
-        // Payment date: set/corrected while paid; removed when no longer paid.
+        // D20: a Final Invoice increase that leaves money due can't stay in
+        // Customer Follow-up — it moves back to Job Completed in this save
+        // (jobCompletedAt is kept, never erased or re-stamped).
+        var autoMovedBack = false, movedBackDue = 0;
+        var invoiceChangedHere = String(editing.finalInvoice == null ? '' : editing.finalInvoice) !== String(common.finalInvoice == null ? '' : common.finalInvoice) ||
+          (common.hasOwnProperty('zeroInvoiceConfirmedAt') && String(common.zeroInvoiceConfirmedAt || '') !== String(editing.zeroInvoiceConfirmedAt || ''));
+        var candDeal = Object.assign({}, editing, { finalInvoice: common.finalInvoice, quoteAmount: common.quoteAmount }, common.hasOwnProperty('zeroInvoiceConfirmedAt') ? { zeroInvoiceConfirmedAt: common.zeroInvoiceConfirmedAt } : {});
+        var sumBefore = paymentSummary(editing), sumAfter = paymentSummary(candDeal);
+        if (editing.stage === 'customer_followup' && stage === 'customer_followup' && invoiceChangedHere &&
+            sumBefore.basisKind === 'invoice' && sumBefore.balanceCents !== null && sumBefore.balanceCents <= 0 && sumAfter.basisKind === 'invoice' && sumAfter.balanceCents > 0){
+          autoMovedBack = true; movedBackDue = sumAfter.balanceCents;
+          stage = 'job_completed';
+          common.stage = 'job_completed';
+          common.closedAt = null;
+          common.lostReason = '';
+        }
+        // FD4: an invoice change that leaves Total Paid above the invoice
+        // needs confirmation before anything is sent.
+        if (invoiceChangedHere && sumAfter.basisKind === 'invoice' && sumAfter.balanceCents < 0 && !invoiceOverAck){
+          showInvoiceOverpayConfirm(sumAfter.paidCents, sumAfter.basisCents, -sumAfter.balanceCents);
+          return;
+        }
+        // C1: entering a paid stage uses the latest Active payment date,
+        // else the stored date, else today; leaving a paid stage clears it.
         if (isRealized(stage)){
-          if (payDateRaw && payDateRaw !== (editing.paymentReceivedDate || '')) common.paymentReceivedDate = payDateRaw;
+          if (!isRealized(editing.stage)) common.paymentReceivedDate = latestActivePaymentDate(dealId) || editing.paymentReceivedDate || localDateKey();
         } else if (editing.paymentReceivedDate){
           common.paymentReceivedDate = '';
         }
+        var promptCandidate = (editing.stage !== stage && stage === 'job_completed') ||
+          (invoiceChangedHere && !sumBefore.obligationMet);
         setSubmitBusy(submitBtn, true);
         setModalStatus(null, null);
-        var result = await updateDeal(dealId, common, { silent: true });
+        var result = await updateDeal(dealId, common, { silent: true, invoiceOverpaymentConfirmed: invoiceOverAck });
         setSubmitBusy(submitBtn, false);
         if (result.status === 'saved' || result.status === 'queued'){
           closeModal();
+          if (result.status === 'saved'){
+            if (autoMovedBack) openInfoModal('Moved back to Job Completed', 'Moved back to Job Completed \u2014 ' + fmtCents(movedBackDue) + ' now due.');
+            else if (promptCandidate) maybePromptFollowup(dealId);
+          }
+        } else if (result.error === 'invoice_overpayment_unconfirmed' && result.detail){
+          showInvoiceOverpayConfirm(payCents(result.detail.totalPaid), payCents(result.detail.finalInvoice), payCents(result.detail.overBy));
+        } else if (result.detail && result.detail.message){
+          if (result.error === 'followup_not_allowed'){ stSel.value = state.deals[dealId] ? state.deals[dealId].stage : stSel.value; stagePrev = stSel.value; renderStageNote(result.detail.message); }
+          setModalStatus('failed', result.detail.message);
         } else if (result.status === 'conflict'){
           setModalStatus('conflict', 'Someone else updated this job while you were editing. Nothing you\u2019ve entered below has been lost \u2014 click Save changes again to apply it on top of their update, or Cancel to review the latest version first.');
         } else {
@@ -4704,7 +5515,8 @@
           var data = Object.assign({ contactId: contactId, contactName: contactName, createdAt: nowIso(),
             quoteSentAt: stage==='quote_sent' ? nowIso() : null,
             closedAt: (isRealized(stage)||stage==='closed_lost') ? nowIso() : null }, common);
-          if (isRealized(stage)) data.paymentReceivedDate = payDateRaw;
+          // A new opportunity has no payments yet: C1 falls back to today.
+          if (isRealized(stage)) data.paymentReceivedDate = localDateKey();
           // Milestone stamps for an opportunity CREATED directly in a later
           // stage — the same rule a stage change applies (stageTransitionPatch
           // and the edit path): scheduledAt only when entering Scheduled,
