@@ -1667,9 +1667,17 @@
     if (keys.length === 0) return null;
     return state.goalsHistory[keys[keys.length-1]];
   }
+  // Every CSV export goes through here. Text that a spreadsheet could run as
+  // a formula (=, +, -, @ first, possibly hidden behind leading spaces or
+  // control characters, or a leading tab / carriage return) is prefixed with
+  // an apostrophe so Excel and Google Sheets treat it as text. Real numbers
+  // (number values, or plain numeric text such as -100.00) are left as they
+  // are, so negative amounts stay numeric.
   function csvEscape(v){
+    var isNum = typeof v === 'number';
     v = (v===undefined||v===null) ? '' : String(v);
-    if (/[",\n]/.test(v)) return '"' + v.replace(/"/g,'""') + '"';
+    if (!isNum && !/^[+-]?\d+(\.\d+)?$/.test(v) && (/^[\s\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2060-\u2064\uFEFF]*[=+\-@]/.test(v) || /^[\t\r]/.test(v))) v = "'" + v;
+    if (/[",\n\r]/.test(v)) return '"' + v.replace(/"/g,'""') + '"';
     return v;
   }
 
@@ -1694,7 +1702,7 @@
     return true;
   }
   function setView(v){
-    if (v !== 'dashboard' && kpiDrill && kpiDrill.key) closeKpiDrill();   // Monthly Goals drill-down belongs to the Dashboard only
+    if (v !== 'dashboard' && kpiDrill && kpiDrill.key) closeKpiDrill();   // Dashboard drill-downs (Monthly, Daily, Weekly) belong to the Dashboard only
     state.view = v;
     document.querySelectorAll('[data-nav]').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-nav')===v); });
     document.querySelectorAll('.view').forEach(function(sec){ sec.hidden = sec.getAttribute('data-view') !== v; });
@@ -2484,15 +2492,25 @@
   // Business Day section so both use one definition of each daily metric.
   function computeDailyMetrics(dayDate){
     var dayStart = dayDate ? new Date(dayDate.getTime()) : new Date(); dayStart.setHours(0,0,0,0);
-    var dayEnd = new Date(dayStart.getTime() + 86400000);
+    // Local calendar day: next local midnight (23 or 25 hours on daylight-saving change days), not a fixed 24 hours.
+    var dayEnd = new Date(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate() + 1);
     var contacts = Object.keys(state.contacts).map(function(k){ return state.contacts[k]; });
     var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
     var followups = Object.keys(state.followups).map(function(k){ return state.followups[k]; });
+    // Each count is the length of the list below; the lists are also handed
+    // to the drill-down, so a card and its list can never disagree.
+    var lists = {
+      newContacts: contacts.filter(function(c){ return inRange(c.createdAt, dayStart, dayEnd); }),
+      followups: followups.filter(function(f){ return inRange(f.loggedAt, dayStart, dayEnd); }),
+      quotesSent: deals.filter(function(d){ return quoteInRange(d, dayStart, dayEnd); }),
+      jobsScheduled: deals.filter(function(d){ return inRange(d.scheduledAt, dayStart, dayEnd); })
+    };
     return {
-      newContacts: contacts.filter(function(c){ return inRange(c.createdAt, dayStart, dayEnd); }).length,
-      followups: followups.filter(function(f){ return inRange(f.loggedAt, dayStart, dayEnd); }).length,
-      quotesSent: deals.filter(function(d){ return quoteInRange(d, dayStart, dayEnd); }).length,
-      jobsScheduled: deals.filter(function(d){ return inRange(d.scheduledAt, dayStart, dayEnd); }).length
+      newContacts: lists.newContacts.length,
+      followups: lists.followups.length,
+      quotesSent: lists.quotesSent.length,
+      jobsScheduled: lists.jobsScheduled.length,
+      lists: lists, start: dayStart, end: dayEnd
     };
   }
   // wbArg (optional): {start,end} of the Sun–Sat week to measure;
@@ -2504,12 +2522,21 @@
     // Revenue and quotes use the shared definitions (revenueAmount /
     // revenueInRange / quoteInRange) also used by Monthly, Trends and Reports.
     var paidInWeek = deals.filter(function(d){ return revenueInRange(d, wb.start, wb.end); });
+    // Each count is the length of the list below (also used by the drill-down).
+    var lists = {
+      newContacts: contacts.filter(function(c){ return inRange(c.createdAt, wb.start, wb.end); }),
+      quotesSent: deals.filter(function(d){ return quoteInRange(d, wb.start, wb.end); }),
+      jobsScheduled: deals.filter(function(d){ return inRange(d.scheduledAt, wb.start, wb.end); }),
+      jobsCompleted: deals.filter(function(d){ return inRange(d.jobCompletedAt, wb.start, wb.end); }),
+      revenue: paidInWeek
+    };
     return {
-      newContacts: contacts.filter(function(c){ return inRange(c.createdAt, wb.start, wb.end); }).length,
-      quotesSent: deals.filter(function(d){ return quoteInRange(d, wb.start, wb.end); }).length,
-      jobsScheduled: deals.filter(function(d){ return inRange(d.scheduledAt, wb.start, wb.end); }).length,
-      jobsCompleted: deals.filter(function(d){ return inRange(d.jobCompletedAt, wb.start, wb.end); }).length,
-      revenue: paidInWeek.reduce(function(s,d){ return s + revenueAmount(d); }, 0)
+      newContacts: lists.newContacts.length,
+      quotesSent: lists.quotesSent.length,
+      jobsScheduled: lists.jobsScheduled.length,
+      jobsCompleted: lists.jobsCompleted.length,
+      revenue: paidInWeek.reduce(function(s,d){ return s + revenueAmount(d); }, 0),
+      lists: lists, start: wb.start, end: wb.end
     };
   }
   // Daily status is straight achievement against the full daily target —
@@ -2712,6 +2739,7 @@
     var deals = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
     function dayRange(day){ var s = new Date(day.getFullYear(), day.getMonth(), day.getDate()); return { start: s, end: new Date(s.getFullYear(), s.getMonth(), s.getDate() + 1) }; }
     function add(gridId, r){
+      kpiDrill.payRanges[gridId] = r;   // the exact range this card used (drill-down reuses it)
       var pr = paymentsReceivedInRange(deals, r.start, r.end);
       var g = document.getElementById(gridId);
       if (g) g.insertAdjacentHTML('beforeend', buildValueKpiCard('Payments received', fmtSignedCents(pr.cents), paymentsReceivedNote(pr)));
@@ -2738,17 +2766,34 @@
     });
   });
 
-  // ---------- Monthly Goals drill-down (follow-on to Phase 4) ----------
-  // READ-ONLY. Tapping a Monthly Goals card lists the exact opportunities
-  // behind it. The lists come from kpiDrill.snapshot, which renderDashboard()
-  // fills with the SAME arrays it used to compute the four cards, so a list
-  // can never disagree with its card. No goal formula is repeated here, and
-  // nothing in this section writes to any record.
+  // ---------- KPI drill-down: Monthly Goals, Daily and Weekly (read-only) ----------
+  // Tapping a Dashboard card lists exactly what it counts. Every list comes
+  // from a snapshot of the SAME arrays the card was computed from:
+  //  - Monthly: kpiDrill.snaps['kpi-grid'], filled by renderDashboard();
+  //  - Daily / Previous business day / Weekly / Previous week: filled by
+  //    kpiDrillCaptureActivity() from computeDailyMetrics / computeWeeklyMetrics
+  //    (the card functions themselves) and the Payments received card's range.
+  // No goal formula is repeated here, and nothing in this section writes.
   var KPI_DRILL_KEYS = ['newOpps', 'quotes', 'completed', 'revenue'];
-  var KPI_DRILL_LABELS = { newOpps:'New opportunities', quotes:'Quotes sent', completed:'Jobs completed', revenue:'Revenue closed' };
-  var kpiDrill = { key: null, snapshot: null, returnFocusKey: null };
+  var KPI_DRILL_LABELS = { newOpps:'New opportunities', quotes:'Quotes sent', completed:'Jobs completed', revenue:'Revenue closed',
+    newContacts:'New contacts', followups:'Follow-ups', scheduled:'Jobs scheduled', completedJc:'Jobs completed', payments:'Payments received' };
+  // Daily / Weekly card label -> drill key (labels as drawn by the unchanged card functions).
+  var ACTIVITY_DRILL_KEYS = { 'New contacts':'newContacts', 'Follow-ups':'followups', 'Quotes sent':'quotes', 'Jobs scheduled':'scheduled', 'Jobs completed':'completedJc', 'Revenue':'revenue', 'Payments received':'payments' };
+  var ACTIVITY_GRIDS = ['prev-day-kpi-grid', 'daily-kpi-grid', 'prev-week-kpi-grid', 'weekly-kpi-grid'];
+  var kpiDrill = { key: null, grid: 'kpi-grid', snapshot: null, snaps: {}, payRanges: {}, returnFocusKey: null };
   var kpiDrillEl = document.getElementById('kpi-drill');
   var kpiDrillPanel = document.getElementById('kpi-drill-panel');
+  function kdSnap(){ return kpiDrill.grid === 'kpi-grid' ? kpiDrill.snapshot : kpiDrill.snaps[kpiDrill.grid]; }
+  function kdLabel(key, snap){ return (snap && snap.labels && snap.labels[key]) || KPI_DRILL_LABELS[key]; }
+  function kdMakeClickable(card, key, grid, label){
+    card.setAttribute('data-drill', key);
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    var actualEl = card.querySelector('.kpi-actual'), goalEl = card.querySelector('.kpi-goal');
+    card.setAttribute('aria-label', label + ' ' + (actualEl ? actualEl.textContent.trim() : '') + ' ' + (goalEl ? goalEl.textContent.trim() : '') + (grid === 'kpi-grid' ? '. Show the opportunities behind this number.' : '. Show what is behind this number.'));
+    card.addEventListener('click', function(){ openKpiDrill(key, grid); });
+    card.addEventListener('keydown', function(e){ if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); openKpiDrill(key, grid); } });
+  }
   // Makes the four Monthly Goals cards (already drawn, unchanged) open their
   // drill-down. Only wires them when the four cards are present in the
   // expected order, so a future change to the cards can't mislabel a list.
@@ -2757,19 +2802,51 @@
     if (cards.length !== KPI_DRILL_KEYS.length) return;
     var labelsOk = cards.every(function(c, i){ var l = c.querySelector('.kpi-label'); return l && l.textContent.trim() === KPI_DRILL_LABELS[KPI_DRILL_KEYS[i]]; });
     if (!labelsOk) return;
-    cards.forEach(function(card, i){
-      var key = KPI_DRILL_KEYS[i];
-      card.setAttribute('data-drill', key);
-      card.setAttribute('role', 'button');
-      card.setAttribute('tabindex', '0');
-      var actualEl = card.querySelector('.kpi-actual'), goalEl = card.querySelector('.kpi-goal');
-      card.setAttribute('aria-label', KPI_DRILL_LABELS[key] + ' ' + (actualEl ? actualEl.textContent.trim() : '') + ' ' + (goalEl ? goalEl.textContent.trim() : '') + '. Show the opportunities behind this number.');
-      card.addEventListener('click', function(){ openKpiDrill(key); });
-      card.addEventListener('keydown', function(e){ if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); openKpiDrill(key); } });
+    kpiDrill.snaps['kpi-grid'] = kpiDrill.snapshot;
+    cards.forEach(function(card, i){ kdMakeClickable(card, KPI_DRILL_KEYS[i], 'kpi-grid', KPI_DRILL_LABELS[KPI_DRILL_KEYS[i]]); });
+  }
+  // Daily / Weekly: snapshot each section from the card functions, then make
+  // each card clickable ONLY if its list reproduces the number on the card.
+  function kpiDrillCaptureActivity(){
+    var dealsF = applySourceFilter(Object.keys(state.deals).map(function(k){ return state.deals[k]; }));
+    var defs = [
+      ['prev-day-kpi-grid', 'Previous business day', function(){ return computeDailyMetrics(previousBusinessDay(new Date())); }, 'day'],
+      ['daily-kpi-grid', 'Today', function(){ return computeDailyMetrics(); }, 'day'],
+      ['prev-week-kpi-grid', 'Previous week', function(){ return computeWeeklyMetrics(previousWeekBounds()); }, 'week'],
+      ['weekly-kpi-grid', 'This week', function(){ return computeWeeklyMetrics(); }, 'week']
+    ];
+    defs.forEach(function(def){
+      var grid = def[0], m = def[2](), lists = m.lists;
+      var last = new Date(m.end.getTime() - 1);
+      var span = def[3] === 'day' ? m.start.toLocaleDateString('en-US', { weekday:'long', month:'short', day:'numeric', year:'numeric' })
+        : m.start.toLocaleDateString('en-US', { month:'short', day:'numeric' }) + ' – ' + last.toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+      var payR = kpiDrill.payRanges[grid];
+      var snap = { kind: 'activity', grid: grid, sourceFilter: state.sourceFilter, deals: dealsF, labels: {},
+        bounds: { start: m.start, end: m.end, label: def[1] + ' (' + span + ')', key: (def[3] === 'week' ? 'week-' : '') + localDateKey(m.start) },
+        newContacts: lists.newContacts, followups: lists.followups || [], quotes: lists.quotesSent, scheduled: lists.jobsScheduled,
+        completedJc: lists.jobsCompleted || [], revenue: lists.revenue || [], revenueTotal: m.revenue || 0,
+        payBounds: payR || null, pr: payR ? paymentsReceivedInRange(dealsF, payR.start, payR.end) : null };
+      kpiDrill.snaps[grid] = snap;
+      var g = document.getElementById(grid);
+      if (!g) return;
+      Array.prototype.slice.call(g.children).forEach(function(card){
+        if (!card.classList || !card.classList.contains('kpi-card')) return;
+        var l = card.querySelector('.kpi-label'), a = card.querySelector('.kpi-actual');
+        var label = l ? l.textContent.trim() : '', key = ACTIVITY_DRILL_KEYS[label];
+        if (!key || !a) return;
+        var shown = a.textContent.trim(), ok;
+        if (key === 'payments') ok = !!snap.pr && fmtSignedCents(snap.pr.cents) === shown;
+        else if (key === 'revenue') ok = fmtMoneyPrecise(snap.revenueTotal) === shown;
+        else ok = String((snap[key] || []).length) === shown;
+        if (!ok) return;   // never offer a list that would not reconcile to the card
+        snap.labels[key] = label;
+        kdMakeClickable(card, key, grid, label);
+      });
     });
   }
-  function openKpiDrill(key){
-    if (!kpiDrill.snapshot) return;
+  function openKpiDrill(key, grid){
+    kpiDrill.grid = grid || 'kpi-grid';
+    if (!kdSnap()) return;
     kpiDrill.key = key; kpiDrill.returnFocusKey = key;
     renderKpiDrill();
     kpiDrillEl.hidden = false;
@@ -2777,12 +2854,12 @@
     var c = document.getElementById('kd-close'); if (c) c.focus();
   }
   function closeKpiDrill(){
-    var back = kpiDrill.returnFocusKey;
+    var back = kpiDrill.returnFocusKey, grid = kpiDrill.grid;
     kpiDrill.key = null;
     kpiDrillEl.hidden = true;
     kpiDrillPanel.innerHTML = '';
     document.body.classList.remove('kd-open');
-    var card = back && document.querySelector('#kpi-grid .kpi-card[data-drill="' + back + '"]');
+    var card = back && document.querySelector('#' + grid + ' .kpi-card[data-drill="' + back + '"]');
     if (card) card.focus();
   }
   kpiDrillEl.addEventListener('click', function(e){ if (e.target === kpiDrillEl) closeKpiDrill(); });
@@ -2809,7 +2886,8 @@
   // Revenue Closed detail for one opportunity: the goal amount/date exactly
   // as the card counts them (revenueAmount / revenueDateInfo, unchanged),
   // beside the recorded ledger transactions. Flags are informational only.
-  function kdRevenueDetail(d, b){
+  // byDay: for Daily/Weekly periods, name the outside dates instead of months.
+  function kdRevenueDetail(d, b, byDay){
     var r = revenueDateInfo(d);
     var rows = paymentsForDeal(d.id).slice().sort(function(a, z){ return String(a.paymentDate).localeCompare(String(z.paymentDate)) || String(a.createdAt || '').localeCompare(String(z.createdAt || '')); });
     var active = rows.filter(function(p){ return p.status === 'Active'; });
@@ -2820,6 +2898,7 @@
     ['Payment', 'Refund'].forEach(function(type){
       var outside = active.filter(function(p){ return p.txnType === type && !inMeasureRange(parseDateOnlyLocal(p.paymentDate), b.start, b.end); });
       if (!outside.length) return;
+      if (byDay){ flags.push({ text: type + ' dated outside this period: ' + outside.map(function(p){ return fmtPayDate(p.paymentDate); }).join(', '), warn: true }); return; }
       var months = {}; outside.forEach(function(p){ var dt = parseDateOnlyLocal(p.paymentDate); months[dt ? dt.toLocaleDateString('en-US', { month:'long', year:'numeric' }) : 'an unreadable date'] = true; });
       flags.push({ text: type + ' dated in ' + Object.keys(months).join(', '), warn: true });
     });
@@ -2836,96 +2915,162 @@
       ledger: rows, status: s.status + (s.estimated ? ' (estimated)' : ''), legacy: legacy, legacyText: legacy ? legacyAttentionText(d) : '', flags: flags
     };
   }
-  // Rows for one card, built ONLY from that card's own list in the snapshot.
+  function kdContactName(id, fallback){ var c = id && state.contacts[id]; return String((c && c.name) ? c.name : (fallback || '')); }
+  // Rows for one card, built ONLY from that card's own list in its snapshot.
   function kpiDrillRows(key, snap){
-    var b = snap.bounds;
-    var list = snap[key] || [];
-    var rows = list.map(function(d){
-      var row = { deal: d };
-      if (key === 'newOpps'){ row.date = d.createdAt ? new Date(d.createdAt) : null; row.dateSource = 'createdAt (opportunity logged)'; }
-      else if (key === 'quotes'){ var q = quoteCredit(d); row.date = q ? q.date : null; row.dateSource = q ? kdQuoteSource(q) : ''; }
-      else if (key === 'completed'){ row.date = d.closedAt ? new Date(d.closedAt) : null; row.dateSource = 'closedAt (moved to a paid stage)'; }
-      else { row.rev = kdRevenueDetail(d, b); row.date = row.rev.goalDate; row.dateSource = row.rev.goalDateSource; }
-      return row;
-    });
-    rows.sort(function(a, z){ return ((a.date ? a.date.getTime() : 0) - (z.date ? z.date.getTime() : 0)) || kdCustomer(a.deal).localeCompare(kdCustomer(z.deal)); });
-    var totalCents = key === 'revenue' ? rows.reduce(function(t, r){ return t + r.rev.amountCents; }, 0) : null;
+    var b = snap.bounds, byDay = snap.kind === 'activity';
+    var rows;
+    if (key === 'payments'){
+      var pr = snap.pr;
+      rows = pr.transactions.map(function(t){ return { kind: 'txn', deal: t.deal, txn: t.payment, date: t.date, cents: t.signedCents }; })
+        .concat(pr.bridgedDeals.map(function(d){ var r = revenueDateInfo(d); return { kind: 'bridge', deal: d, date: r ? r.date : null, cents: payCents(revenueAmount(d)) }; }))
+        .concat(pr.boundaryDeals.map(function(d){ var r = revenueDateInfo(d); return { kind: 'boundary', deal: d, date: r ? r.date : null, cents: 0 }; }));
+    } else {
+      rows = (snap[key] || []).map(function(item){
+        var row = {};
+        if (key === 'newContacts'){ row.contact = item; row.date = item.createdAt ? new Date(item.createdAt) : null; row.dateSource = 'createdAt (contact added)'; return row; }
+        if (key === 'followups'){ row.fu = item; row.deal = item.dealId ? state.deals[item.dealId] || null : null; row.date = item.loggedAt ? new Date(item.loggedAt) : null; row.dateSource = 'loggedAt (follow-up logged)'; return row; }
+        var d = item; row.deal = d;
+        if (key === 'newOpps'){ row.date = d.createdAt ? new Date(d.createdAt) : null; row.dateSource = 'createdAt (opportunity logged)'; }
+        else if (key === 'quotes'){ var q = quoteCredit(d); row.date = q ? q.date : null; row.dateSource = q ? kdQuoteSource(q) : ''; }
+        else if (key === 'completed'){ row.date = d.closedAt ? new Date(d.closedAt) : null; row.dateSource = 'closedAt (moved to a paid stage)'; }
+        else if (key === 'scheduled'){ row.date = d.scheduledAt ? new Date(d.scheduledAt) : null; row.dateSource = 'scheduledAt (moved to Scheduled)'; }
+        else if (key === 'completedJc'){ row.date = d.jobCompletedAt ? new Date(d.jobCompletedAt) : null; row.dateSource = 'jobCompletedAt (job completed)'; }
+        else { row.rev = kdRevenueDetail(d, b, byDay); row.date = row.rev.goalDate; row.dateSource = row.rev.goalDateSource; }
+        return row;
+      });
+    }
+    function nameOf(r){ return r.contact ? kdContactName(r.contact.id, r.contact.name) : r.fu ? kdContactName(r.fu.contactId, r.deal ? r.deal.contactName : '') : kdCustomer(r.deal); }
+    rows.forEach(function(r){ r.name = nameOf(r); });
+    rows.sort(function(a, z){ return ((a.date ? a.date.getTime() : 0) - (z.date ? z.date.getTime() : 0)) || String(a.name).localeCompare(String(z.name)); });
+    var totalCents = key === 'revenue' ? rows.reduce(function(t, r){ return t + r.rev.amountCents; }, 0) : key === 'payments' ? rows.reduce(function(t, r){ return t + r.cents; }, 0) : null;
     return { rows: rows, count: rows.length, totalCents: totalCents };
   }
   var KPI_DRILL_RULES = {
     newOpps: 'Counted by the date the opportunity was logged (createdAt).',
     quotes: 'Counted once per opportunity by its quote date: quoteSentAt, or (when that is missing) the earliest later milestone, as shown.',
     completed: 'Counted when the opportunity is in a paid stage (Payment received or Customer follow-up) and its closedAt falls in this month. The job completed date is shown for comparison only.',
-    revenue: 'Final Invoice (or Quote if there is no Final Invoice) of opportunities in a paid stage, dated by paymentReceivedDate, or closedAt when that is blank. Recorded payments are shown separately and do not change this figure.'
+    revenue: 'Final Invoice (or Quote if there is no Final Invoice) of opportunities in a paid stage, dated by paymentReceivedDate, or closedAt when that is blank. Recorded payments are shown separately and do not change this figure.',
+    newContacts: 'Contacts added in this period (createdAt). Contacts are not filtered by referral source, the same as the card.',
+    followups: 'Follow-ups logged in this period (loggedAt). Follow-ups are not filtered by referral source, the same as the card.',
+    scheduled: 'Opportunities that moved to Scheduled in this period (scheduledAt). The appointment date is shown for comparison only.',
+    completedJc: 'Opportunities whose job completed date (jobCompletedAt) falls in this period, in any stage. The paid-stage date (closedAt) is shown for comparison only.',
+    payments: 'Recorded payments minus refunds dated in this period (voided entries count $0), plus any legacy amounts the approved Phase 4 rule counts. Not a goal measure.'
   };
+  function kdUnit(key, n){ var w = key === 'newContacts' ? ['contact', 'contacts'] : key === 'followups' ? ['follow-up', 'follow-ups'] : key === 'payments' ? ['entry', 'entries'] : ['opportunity', 'opportunities']; return n + ' ' + (n === 1 ? w[0] : w[1]); }
+  function kdRevenueBody(d, v){
+    var st = stageInfo(d.stage), body = '';
+    body += '<div class="kd-meta">' + esc(st.label) + ' · Amount from <b>' + esc(v.basis) + '</b> · Payment status: <b>' + esc(v.status) + '</b></div>';
+    body += '<div class="kd-goaldate"><b>Goal date (used for this card):</b> ' + esc(kdDay(v.goalDate)) + ' · from ' + esc(v.goalDateSource) + '</div>';
+    body += '<div class="kd-meta">paymentReceivedDate: ' + esc(d.paymentReceivedDate ? fmtPayDate(d.paymentReceivedDate) : 'blank') + ' · closedAt: ' + esc(kdStamp(d.closedAt) || 'blank') + ' · Job completed: ' + esc(kdStamp(d.jobCompletedAt) || 'not recorded') + '</div>';
+    body += '<div class="kd-pay"><b>Recorded payments (actual payment dates):</b> ';
+    if (!v.ledger.length) body += '<span class="kd-pay-line">None recorded</span>';
+    v.ledger.forEach(function(p){
+      var refund = p.txnType === 'Refund';
+      body += '<span class="kd-pay-line' + (p.status === 'Voided' ? ' voided' : '') + '">' + esc(fmtPayDate(p.paymentDate)) + ' · ' + esc(p.txnType) + ' · ' + esc((refund ? '−' : '') + fmtMoneyPrecise(p.amount)) + ' · ' + esc(payerLabel(p)) + (p.status === 'Voided' ? ' · voided' : '') + '</span>';
+    });
+    body += '</div>';
+    if (v.legacy) body += '<div class="kd-meta">' + esc(v.legacyText) + '</div>';
+    if (v.flags.length) body += '<div class="kd-flags">' + v.flags.map(function(f){ return '<span class="kd-flag' + (f.warn ? '' : ' info') + '">' + esc(f.text) + '</span>'; }).join('') + '</div>';
+    return body;
+  }
+  function kdFlagsHtml(list){ return list.length ? '<div class="kd-flags">' + list.map(function(t){ return '<span class="kd-flag' + (t === 'Archived' ? ' info' : '') + '">' + esc(t) + '</span>'; }).join('') + '</div>' : ''; }
+  function kdRowHtml(attr, id, name, amt, body){
+    if (!attr || !id) return '<div class="kd-row" style="cursor:default;"><div class="kd-row-top"><div class="kd-name">' + name + '</div>' + (amt ? '<div class="kd-amt">' + esc(amt) + '</div>' : '') + '</div>' + body + '</div>';   // nothing to open
+    return '<div class="kd-row" role="button" tabindex="0" ' + attr + '="' + esc(id) + '"><div class="kd-row-top"><div class="kd-name">' + name + '</div>' + (amt ? '<div class="kd-amt">' + esc(amt) + '</div>' : '') + '</div>' + body + '</div>';
+  }
   function renderKpiDrill(){
-    var key = kpiDrill.key, snap = kpiDrill.snapshot;
+    var key = kpiDrill.key, snap = kdSnap();
     if (!key || !snap) return;
     var data = kpiDrillRows(key, snap);
-    var monthLabel = snap.bounds.label;
+    var periodLabel = snap.bounds.label;
     var srcLabel = snap.sourceFilter === 'all' ? 'All sources' : 'Source: ' + snap.sourceFilter;
-    var summary = key === 'revenue' ? fmtMoney(snap.revenueTotal) + ' from ' + data.count + ' opportunit' + (data.count === 1 ? 'y' : 'ies') : data.count + ' opportunit' + (data.count === 1 ? 'y' : 'ies');
-    var html = '<div class="kd-head"><div class="kd-title-row"><div><div class="kd-title" id="kd-title">' + esc(KPI_DRILL_LABELS[key]) + ' — ' + esc(monthLabel) + '</div>' +
+    var summary = key === 'revenue' ? fmtMoney(snap.revenueTotal) + ' from ' + kdUnit(key, data.count)
+      : key === 'payments' ? fmtSignedCents(snap.pr.cents) + ' from ' + kdUnit(key, data.count)
+      : kdUnit(key, data.count);
+    var html = '<div class="kd-head"><div class="kd-title-row"><div><div class="kd-title" id="kd-title">' + esc(kdLabel(key, snap)) + ' — ' + esc(periodLabel) + '</div>' +
       '<div class="kd-sub">' + esc(srcLabel) + ' · ' + esc(KPI_DRILL_RULES[key]) + '</div></div>' +
       '<button type="button" class="modal-close" id="kd-close" aria-label="Close">&times;</button></div>' +
       '<div class="kd-summary"><div class="kd-total" id="kd-total">' + esc(summary) + '</div><div class="kd-actions"><button type="button" class="btn btn-ghost btn-sm" id="kd-export">Export CSV</button></div></div></div>';
     html += '<div class="kd-list" id="kd-list">';
-    if (!data.rows.length) html += '<div class="kd-empty">No opportunities count toward this card for ' + esc(monthLabel) + '.</div>';
+    if (!data.rows.length) html += '<div class="kd-empty">' + (snap.kind === 'activity' ? 'Nothing counts toward this card for ' : 'No opportunities count toward this card for ') + esc(periodLabel) + '.</div>';
     data.rows.forEach(function(r){
-      var d = r.deal, st = stageInfo(d.stage);
-      var amt = '', body = '';
-      if (key === 'revenue'){
-        var v = r.rev;
-        amt = fmtCents(v.amountCents);
-        body += '<div class="kd-meta">' + esc(st.label) + ' · Amount from <b>' + esc(v.basis) + '</b> · Payment status: <b>' + esc(v.status) + '</b></div>';
-        body += '<div class="kd-goaldate"><b>Goal date (used for this card):</b> ' + esc(kdDay(v.goalDate)) + ' · from ' + esc(v.goalDateSource) + '</div>';
-        body += '<div class="kd-meta">paymentReceivedDate: ' + esc(d.paymentReceivedDate ? fmtPayDate(d.paymentReceivedDate) : 'blank') + ' · closedAt: ' + esc(kdStamp(d.closedAt) || 'blank') + ' · Job completed: ' + esc(kdStamp(d.jobCompletedAt) || 'not recorded') + '</div>';
-        body += '<div class="kd-pay"><b>Recorded payments (actual payment dates):</b> ';
-        if (!v.ledger.length) body += '<span class="kd-pay-line">None recorded</span>';
-        v.ledger.forEach(function(p){
-          var refund = p.txnType === 'Refund';
-          body += '<span class="kd-pay-line' + (p.status === 'Voided' ? ' voided' : '') + '">' + esc(fmtPayDate(p.paymentDate)) + ' · ' + esc(p.txnType) + ' · ' + esc((refund ? '−' : '') + fmtMoneyPrecise(p.amount)) + ' · ' + esc(payerLabel(p)) + (p.status === 'Voided' ? ' · voided' : '') + '</span>';
-        });
-        body += '</div>';
-        if (v.legacy) body += '<div class="kd-meta">' + esc(v.legacyText) + '</div>';
-        if (v.flags.length) body += '<div class="kd-flags">' + v.flags.map(function(f){ return '<span class="kd-flag' + (f.warn ? '' : ' info') + '">' + esc(f.text) + '</span>'; }).join('') + '</div>';
-      } else {
-        var info = [];
-        info.push(esc(st.label));
+      var d = r.deal, body = '', fl = [];
+      if (key === 'newContacts'){
+        var c = r.contact;
+        body += '<div class="kd-goaldate"><b>Date used for this card:</b> ' + esc(kdStamp(r.date) || 'none') + ' · from ' + esc(r.dateSource) + '</div>';
+        body += '<div class="kd-meta">' + [c.phone ? esc(String(c.phone)) : '', c.email ? esc(c.email) : '', c.accountType === 'fleet' ? 'Fleet / commercial' : 'Individual'].filter(Boolean).join(' · ') + '</div>';
+        html += kdRowHtml('data-kd-contact', c.id, esc(r.name || 'Unnamed contact') + ' — Contact', '', body);
+        return;
+      }
+      if (key === 'followups'){
+        var f = r.fu;
+        body += '<div class="kd-goaldate"><b>Date used for this card:</b> ' + esc(kdStamp(r.date) || 'none') + ' · from ' + esc(r.dateSource) + '</div>';
+        body += '<div class="kd-meta">' + esc(f.type || 'Follow-up') + (f.loggedBy ? ' · by ' + esc(resolveTeamMemberName(f.loggedBy)) : '') + (d ? ' · Opportunity: ' + esc(d.title || 'Untitled job') : '') + '</div>';
+        if (f.note) body += '<div class="kd-meta">' + esc(f.note) + '</div>';
+        html += d ? kdRowHtml('data-kd-deal', d.id, esc(r.name || 'Unknown customer') + ' — ' + esc(f.type || 'Follow-up'), '', body)
+                  : kdRowHtml((f.contactId && state.contacts[f.contactId]) ? 'data-kd-contact' : null, f.contactId || '', esc(r.name || 'Unknown customer') + ' — ' + esc(f.type || 'Follow-up'), '', body);
+        return;
+      }
+      if (key === 'payments'){
+        if (r.kind === 'txn'){
+          var p = r.txn;
+          body += '<div class="kd-goaldate"><b>Payment date:</b> ' + esc(fmtPayDate(p.paymentDate)) + ' · ' + esc(p.txnType) + ' · ' + esc(payerLabel(p)) + (p.txnType === 'Refund' ? (p.refundReason ? ' · ' + esc(p.refundReason) : '') : (p.paymentType ? ' · ' + esc(p.paymentType) : '')) + '</div>';
+          body += '<div class="kd-meta">' + esc(stageInfo(d.stage).label) + ' · Payment status: <b>' + esc(paymentSummary(d).status) + '</b></div>';
+        } else if (r.kind === 'bridge'){
+          body += '<div class="kd-goaldate"><b>Legacy amount (not itemized):</b> counted by the pre-ledger rule on ' + esc(kdDay(r.date)) + '</div>';
+          if (d.archived) fl.push('Archived');
+          body += kdFlagsHtml(['Legacy record not yet itemized'].concat(fl));
+        } else {
+          body += '<div class="kd-goaldate"><b>Not counted:</b> unresolved legacy record dated ' + esc(kdDay(r.date)) + ' (on or after ' + esc(fmtPayDate(LEDGER_START)) + ') — needs review</div>';
+          body += kdFlagsHtml(['Needs review']);
+        }
+        html += kdRowHtml('data-kd-deal', d.id, esc(r.name || 'Unknown customer') + ' — ' + esc(d.title || 'Untitled job'), r.kind === 'boundary' ? '$0.00' : fmtSignedCents(r.cents), body);
+        return;
+      }
+      var amt = '';
+      if (key === 'revenue'){ amt = fmtCents(r.rev.amountCents); body = kdRevenueBody(d, r.rev); }
+      else {
+        var st = stageInfo(d.stage), info = [esc(st.label)];
         if (key === 'completed') info.push('Job completed: ' + esc(kdStamp(d.jobCompletedAt) || 'not recorded'));
+        if (key === 'completedJc') info.push('closedAt (paid stage): ' + esc(kdStamp(d.closedAt) || 'not recorded'));
+        if (key === 'scheduled') info.push('Appointment: ' + esc(d.scheduledDate ? fmtPayDate(d.scheduledDate) + (d.scheduledTime ? ' ' + d.scheduledTime : '') : 'not set'));
         if (Number(d.quoteAmount) > 0) info.push('Quote ' + esc(fmtMoneyPrecise(d.quoteAmount)));
-        if (key === 'completed' && Number(d.finalInvoice) > 0) info.push('Final Invoice ' + esc(fmtMoneyPrecise(d.finalInvoice)));
+        if ((key === 'completed' || key === 'completedJc') && Number(d.finalInvoice) > 0) info.push('Final Invoice ' + esc(fmtMoneyPrecise(d.finalInvoice)));
         body += '<div class="kd-goaldate"><b>Date used for this card:</b> ' + esc(r.date ? kdStamp(r.date) : 'none') + ' · from ' + esc(r.dateSource) + '</div>';
         body += '<div class="kd-meta">' + info.join(' · ') + '</div>';
-        var fl = [];
         if (key === 'completed'){ var jc = d.jobCompletedAt ? new Date(d.jobCompletedAt) : null; if (!jc || isNaN(jc.getTime())) fl.push('No job completed date'); else if (!inMeasureRange(jc, snap.bounds.start, snap.bounds.end)) fl.push('Job completed in ' + jc.toLocaleDateString('en-US', { month:'long', year:'numeric' })); }
+        if (key === 'completedJc' && !isRealized(d.stage)) fl.push('Not in a paid stage');
         if (d.archived) fl.push('Archived');
-        if (fl.length) body += '<div class="kd-flags">' + fl.map(function(t){ return '<span class="kd-flag' + (t === 'Archived' ? ' info' : '') + '">' + esc(t) + '</span>'; }).join('') + '</div>';
+        body += kdFlagsHtml(fl);
       }
-      html += '<div class="kd-row" role="button" tabindex="0" data-kd-deal="' + esc(d.id) + '"><div class="kd-row-top"><div class="kd-name">' + esc(kdCustomer(d) || 'Unknown customer') + ' — ' + esc(d.title || 'Untitled job') + '</div>' + (amt ? '<div class="kd-amt">' + esc(amt) + '</div>' : '') + '</div>' + body + '</div>';
+      html += kdRowHtml('data-kd-deal', d.id, esc(r.name || 'Unknown customer') + ' — ' + esc(d.title || 'Untitled job'), amt, body);
     });
     html += '</div>';
     if (key === 'revenue'){
-      var pr = paymentsReceivedInRange(snap.deals, snap.bounds.start, snap.bounds.end);
+      var pr = snap.kind === 'activity' ? (snap.pr || paymentsReceivedInRange(snap.deals, snap.bounds.start, snap.bounds.end)) : paymentsReceivedInRange(snap.deals, snap.bounds.start, snap.bounds.end);
       var prNote = paymentsReceivedNote(pr);
       html += '<div class="kd-foot">' +
-        '<div class="kd-measure" id="kd-foot-goal"><div class="kd-m-label">Revenue closed (goal measure)</div><div class="kd-m-val">' + esc(fmtMoney(snap.revenueTotal)) + '</div><div class="kd-m-note">The figure on the Monthly Goals card. Invoice value of jobs in a paid stage, by goal date.</div></div>' +
-        '<div class="kd-measure" id="kd-foot-payments"><div class="kd-m-label">Payments received (actual activity)</div><div class="kd-m-val">' + esc(fmtSignedCents(pr.cents)) + '</div><div class="kd-m-note">Recorded payments minus refunds dated in ' + esc(monthLabel) + ' (voided entries count $0). Not a goal measure.' + (prNote ? ' ' + esc(prNote.charAt(0).toUpperCase() + prNote.slice(1)) + '.' : '') + '</div></div>' +
+        '<div class="kd-measure" id="kd-foot-goal"><div class="kd-m-label">Revenue closed (goal measure)</div><div class="kd-m-val">' + esc(fmtMoney(snap.revenueTotal)) + '</div><div class="kd-m-note">' + (snap.kind === 'activity' ? 'The figure on the ' + esc(kdLabel(key, snap)) + ' card.' : 'The figure on the Monthly Goals card.') + ' Invoice value of jobs in a paid stage, by goal date.</div></div>' +
+        '<div class="kd-measure" id="kd-foot-payments"><div class="kd-m-label">Payments received (actual activity)</div><div class="kd-m-val">' + esc(fmtSignedCents(pr.cents)) + '</div><div class="kd-m-note">Recorded payments minus refunds dated in ' + esc(periodLabel) + ' (voided entries count $0). Not a goal measure.' + (prNote ? ' ' + esc(prNote.charAt(0).toUpperCase() + prNote.slice(1)) + '.' : '') + '</div></div>' +
         '</div>';
     }
+    if (key === 'payments' && paymentsReceivedNote(snap.pr)) html += '<div class="kd-foot"><div class="kd-measure" id="kd-foot-payments"><div class="kd-m-label">Payments received (actual activity)</div><div class="kd-m-val">' + esc(fmtSignedCents(snap.pr.cents)) + '</div><div class="kd-m-note">' + esc(paymentsReceivedNote(snap.pr).charAt(0).toUpperCase() + paymentsReceivedNote(snap.pr).slice(1)) + '.</div></div></div>';
     kpiDrillPanel.innerHTML = html;
     document.getElementById('kd-close').addEventListener('click', closeKpiDrill);
     document.getElementById('kd-export').addEventListener('click', function(){ exportKpiDrillCsv(key, snap); });
-    kpiDrillPanel.querySelectorAll('[data-kd-deal]').forEach(function(rowEl){
-      rowEl.addEventListener('click', function(){ openDealModal(rowEl.getAttribute('data-kd-deal')); });
-      rowEl.addEventListener('keydown', function(e){ if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); openDealModal(rowEl.getAttribute('data-kd-deal')); } });
-    });
+    function bindRow(rowEl, open){
+      rowEl.addEventListener('click', open);
+      rowEl.addEventListener('keydown', function(e){ if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); open(); } });
+    }
+    kpiDrillPanel.querySelectorAll('[data-kd-deal]').forEach(function(rowEl){ bindRow(rowEl, function(){ openDealModal(rowEl.getAttribute('data-kd-deal')); }); });
+    kpiDrillPanel.querySelectorAll('[data-kd-contact]').forEach(function(rowEl){ var id = rowEl.getAttribute('data-kd-contact'); if (id && state.contacts[id]) bindRow(rowEl, function(){ openContactModal(id); }); });
   }
   function exportKpiDrillCsv(key, snap){
     var data = kpiDrillRows(key, snap);
     var row = function(a){ return a.map(csvEscape).join(','); };
     var lines = [];
-    lines.push(csvEscape(COMPANY_NAME + ' - ' + KPI_DRILL_LABELS[key] + ' - ' + snap.bounds.label + ' - ' + (snap.sourceFilter === 'all' ? 'All sources' : 'Source: ' + snap.sourceFilter)));
+    lines.push(csvEscape(COMPANY_NAME + ' - ' + kdLabel(key, snap) + ' - ' + snap.bounds.label + ' - ' + (snap.sourceFilter === 'all' ? 'All sources' : 'Source: ' + snap.sourceFilter)));
     lines.push(csvEscape(KPI_DRILL_RULES[key]));
     lines.push('');
     if (key === 'revenue'){
@@ -2939,32 +3084,54 @@
       var cardTotal = fmtMoney(snap.revenueTotal).replace(/[$,]/g, '');
       lines.push(row(['Total', '', '', cardTotal]));
       lines.push(row(['Opportunities', data.count]));
-      var pr = paymentsReceivedInRange(snap.deals, snap.bounds.start, snap.bounds.end);
+      var pr = snap.kind === 'activity' ? (snap.pr || paymentsReceivedInRange(snap.deals, snap.bounds.start, snap.bounds.end)) : paymentsReceivedInRange(snap.deals, snap.bounds.start, snap.bounds.end);
       lines.push('');
       lines.push(row(['Revenue closed (goal measure)', cardTotal]));
       lines.push(row(['Payments received (actual payments minus refunds dated in ' + snap.bounds.label + '; not a goal measure)', (pr.cents / 100).toFixed(2)]));
       if (paymentsReceivedNote(pr)) lines.push(row(['Payments received note', paymentsReceivedNote(pr)]));
+    } else if (key === 'payments'){
+      lines.push(row(['Date','Customer','Opportunity','Entry','Payer or recipient','Type or reason','Linked payment','Signed amount','Opportunity ID']));
+      data.rows.forEach(function(r){
+        var d = r.deal;
+        if (r.kind === 'txn'){ var p = r.txn; lines.push(row([p.paymentDate, r.name, d.title || '', p.txnType, payerLabel(p), p.txnType === 'Refund' ? (p.refundReason || '') : (p.paymentType || ''), p.relatedPaymentId || '', (r.cents / 100).toFixed(2), d.id])); }
+        else lines.push(row([r.date ? localDateKey(r.date) : '', r.name, d.title || '', r.kind === 'bridge' ? 'Legacy amount (not itemized, counted by pre-ledger rule)' : 'Legacy record dated on/after ' + LEDGER_START + ' (not counted; needs review)', '', '', '', (r.cents / 100).toFixed(2), d.id]));
+      });
+      lines.push(row(['Total', '', '', '', '', '', '', (snap.pr.cents / 100).toFixed(2), '']));
+      if (paymentsReceivedNote(snap.pr)) lines.push(row(['Note', paymentsReceivedNote(snap.pr)]));
+    } else if (key === 'newContacts'){
+      lines.push(row(['Contact','Phone','Email','Type','Created (date used)','Contact ID']));
+      data.rows.forEach(function(r){ var c = r.contact; lines.push(row([r.name, c.phone != null ? String(c.phone) : '', c.email || '', c.accountType === 'fleet' ? 'Fleet / commercial' : 'Individual', kdCsvStamp(r.date), c.id])); });
+      lines.push(row(['Total', data.count + ' contacts']));
+    } else if (key === 'followups'){
+      lines.push(row(['Customer','Type','Note','Logged by','Logged (date used)','Opportunity','Follow-up ID']));
+      data.rows.forEach(function(r){ var f = r.fu; lines.push(row([r.name, f.type || '', f.note || '', f.loggedBy ? resolveTeamMemberName(f.loggedBy) : '', kdCsvStamp(r.date), r.deal ? (r.deal.title || '') : '', f.id])); });
+      lines.push(row(['Total', data.count + ' follow-ups']));
     } else {
-      var dateHead = { newOpps:'Created (date used)', quotes:'Quote date (date used)', completed:'closedAt (date used)' }[key];
+      var dateHead = { newOpps:'Created (date used)', quotes:'Quote date (date used)', completed:'closedAt (date used)', scheduled:'scheduledAt (date used)', completedJc:'jobCompletedAt (date used)' }[key];
       var head = ['Customer','Opportunity','Stage', dateHead, 'Date source'];
       if (key === 'completed') head.push('jobCompletedAt');
+      if (key === 'completedJc') head.push('closedAt');
+      if (key === 'scheduled') head.push('Appointment date');
       head.push('Quote amount');
-      if (key === 'completed') head.push('Final invoice');
+      if (key === 'completed' || key === 'completedJc') head.push('Final invoice');
       head = head.concat(['Archived','Opportunity ID']);
       lines.push(row(head));
       data.rows.forEach(function(r){
         var d = r.deal;
         var cells = [kdCustomer(d), d.title || '', stageInfo(d.stage).label, kdCsvStamp(r.date), r.dateSource];
         if (key === 'completed') cells.push(kdCsvStamp(d.jobCompletedAt));
+        if (key === 'completedJc') cells.push(kdCsvStamp(d.closedAt));
+        if (key === 'scheduled') cells.push(d.scheduledDate || '');
         cells.push(Number(d.quoteAmount) > 0 ? Number(d.quoteAmount).toFixed(2) : '');
-        if (key === 'completed') cells.push(Number(d.finalInvoice) > 0 ? Number(d.finalInvoice).toFixed(2) : '');
+        if (key === 'completed' || key === 'completedJc') cells.push(Number(d.finalInvoice) > 0 ? Number(d.finalInvoice).toFixed(2) : '');
         cells = cells.concat([d.archived ? 'Yes' : 'No', d.id]);
         lines.push(row(cells));
       });
       lines.push(row(['Total', data.count + ' opportunities']));
     }
     var src = snap.sourceFilter === 'all' ? '' : '-' + String(snap.sourceFilter).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase();
-    downloadCsv('superior-glass-' + key.replace(/([A-Z])/g, '-$1').toLowerCase() + '-' + snap.bounds.key + src + '.csv', lines.join('\n'));
+    var fileKey = key === 'completedJc' ? 'completed' : key;
+    downloadCsv('superior-glass-' + fileKey.replace(/([A-Z])/g, '-$1').toLowerCase() + '-' + snap.bounds.key + src + '.csv', lines.join('\n'));
   }
 
   // ---------- dashboard ----------
@@ -2975,6 +3142,7 @@
     renderPreviousWeek();
     renderWeeklyGoals();
     renderPaymentsReceivedCards();
+    try { kpiDrillCaptureActivity(); } catch (drillErr) { console.error('Daily/Weekly drill-down:', drillErr); }
     var bounds = getMonthBounds(state.monthOffset);
     document.getElementById('month-label').textContent = bounds.label;
     document.getElementById('month-today').style.visibility = state.monthOffset === 0 ? 'hidden' : 'visible';
