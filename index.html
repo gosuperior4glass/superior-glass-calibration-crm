@@ -1411,6 +1411,16 @@
   // a definitive pre-write refusal -> 'failed' after one authoritative
   // read; everything else (unreadable, timeout, version_conflict, unknown
   // error, any mismatch) -> the original verifyWrite() re-read path.
+  // RC6.1: who wrote a record. Follow-ups are create-only and the server
+  // records the author as loggedBy/loggedAt (they have no updatedBy), so a
+  // follow-up is this user's own save when it is the version-1 record of a
+  // create (expectedVersion 0) logged by this user. Every other sheet keeps
+  // the original updatedBy rule.
+  function savedByMe(sheetName, rec, me, expectedVersion){
+    if (!rec || !me) return false;
+    if (sheetName === 'followups') return (Number(expectedVersion) || 0) === 0 && Number(rec._version) === 1 && rec.loggedBy === me;
+    return rec.updatedBy === me;
+  }
   async function confirmFromSaveResponse(sheetName, id, data, expectedVersion, startedAt, options, resp){
     var res = (resp && typeof resp === 'object') ? resp : null;
     if (res && res.ok === true){
@@ -1419,7 +1429,7 @@
       var matches = res.sheet === sheetName && String(res.id) === String(id) &&
         Number(res.version) === (expectedVersion||0) + 1 &&
         rec && typeof rec === 'object' && String(rec.id) === String(id) &&
-        Number(rec._version) === Number(res.version) && !!me && rec.updatedBy === me;
+        Number(rec._version) === Number(res.version) && !!me && savedByMe(sheetName, rec, me, expectedVersion);
       if (matches){
         var META = { updatedAt:true, updatedBy:true, _version:true, createdAt:true, createdBy:true };
         var fields = sheetName === 'deals' ? Object.keys(data).filter(function(k){ return !META[k]; }) : Object.keys(data);
@@ -1500,7 +1510,9 @@
     // regardless of that protection.
     var rawList = snap[sheetName] || [];
     var current = rawList.filter(function(r){ return String(r.id) === String(id); })[0] || (state[stateKey] ? state[stateKey][id] : null);
-    var mine = current && current.updatedBy === (state.currentUser&&state.currentUser.email) && new Date(current.updatedAt).getTime() >= startedAt - 3000;
+    var mine = sheetName === 'followups'
+      ? !!current && savedByMe('followups', current, state.currentUser && state.currentUser.email, expectedVersion)   // RC6.1 (no time window: the id is unique to this form)
+      : current && current.updatedBy === (state.currentUser&&state.currentUser.email) && new Date(current.updatedAt).getTime() >= startedAt - 3000;
     // Deal patches routinely include updatedAt (set client-side as a rough
     // timestamp) even though handleSaveDeal() always regenerates it
     // server-side on every save — so comparing it exactly compares a
@@ -2223,8 +2235,8 @@
     persistLocal(); render();
     return confirmedWrite('tasks', finalId, data, expectedVersion, options);
   }
-  function saveFollowup(data, options){
-    var finalId = uid();
+  function saveFollowup(data, options, stableId){
+    var finalId = stableId || uid();   // RC6.1: one id per Log follow-up form, so a retry is recognised, never logged twice
     var merged = Object.assign({}, data, { id: finalId });
     state.followups[finalId] = merged;
     persistLocal();
@@ -4826,6 +4838,7 @@
     backdrop.hidden = false;
     document.getElementById('lf-close').addEventListener('click', closeModal);
     document.getElementById('lf-cancel').addEventListener('click', closeModal);
+    var followupId = uid();   // RC6.1: stable for every retry of this entry
     document.getElementById('log-followup-form').addEventListener('submit', async function(e){
       e.preventDefault();
       var submitBtn = e.target.querySelector('button[type="submit"]');
@@ -4833,8 +4846,11 @@
       var note = document.getElementById('lf-note').value.trim();
       if (submitBtn) submitBtn.disabled = true;
       setModalStatus(null, null);
-      var result = await saveFollowup({ contactId: contactId||null, dealId: dealId||null, type: type, note: note }, { silent: true });
+      var result = await saveFollowup({ contactId: contactId||null, dealId: dealId||null, type: type, note: note }, { silent: true }, followupId);
       if (submitBtn) submitBtn.disabled = false;
+      // RC6.1: after an unconfirmed attempt the retry must send exactly what
+      // may already have been logged under this id, so Type and Note are locked.
+      if (result.status !== 'saved'){ document.getElementById('lf-type').disabled = true; document.getElementById('lf-note').readOnly = true; }
       if (result.status === 'saved'){ closeModal(); }
       else if (result.status === 'conflict'){ setModalStatus('conflict', 'That didn\u2019t sync as expected. Nothing has been lost \u2014 click Log follow-up again to retry.'); }
       else { setModalStatus('failed', 'Not synced \u2014 check your connection and click Log follow-up again. Nothing has been lost.'); }
