@@ -183,6 +183,26 @@
   .two-col { display:grid; grid-template-columns: 1fr 1fr; gap:16px; margin-bottom:26px; }
   .section-label { font-family: var(--font-display); font-weight:700; font-size:14px; margin: 0 0 12px; display:flex; align-items:center; gap:8px; }
   .section-label .count-badge { background: var(--color-surface-2); border-radius:5px; padding:1px 7px; font-size:11px; color: var(--color-text-muted); font-weight:600; }
+  /* RC7.2: follow-up history, customer address / service location */
+  .fh-section { margin: 14px 0 6px; padding-top: 12px; border-top: 1px solid var(--color-border); }
+  .fh-log { display:grid; grid-template-columns: minmax(0,1fr); gap:8px; margin-bottom:10px; }
+  .fh-log textarea { min-height:56px; }
+  .fh-log-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .fh-status { font-size:13px; }
+  .fh-status.ok { color: var(--color-success); font-weight:700; font-size:14px; }
+  .fh-status.err { color: var(--color-danger); }
+  .fh-item { padding:8px 0; border-bottom:1px solid var(--color-border); }
+  .fh-item:last-child { border-bottom:0; }
+  .fh-meta { font-size:12px; color: var(--color-text-muted); display:flex; flex-wrap:wrap; gap:2px 8px; }
+  .fh-type { font-weight:700; color: var(--color-text); }
+  .fh-note { font-size:13.5px; margin-top:3px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .fh-note.empty { color: var(--color-text-muted); font-style:italic; }
+  .fh-empty { font-size:12.5px; color: var(--color-text-muted); }
+  .addr-hint { font-size:12px; color: var(--color-text-muted); margin-top:4px; }
+  .addr-block .addr-label { font-size:11.5px; color: var(--color-text-muted); }
+  .addr-status { font-size:12.5px; margin-top:4px; }
+  .addr-status.ok { color: var(--color-success); font-weight:600; }
+  .addr-status.err { color: var(--color-danger); }
   .panel-list { background: var(--color-surface); border:1px solid var(--color-border); border-radius: var(--radius); overflow:hidden; }
   .panel-row { display:flex; align-items:center; gap:12px; padding:11px 16px; border-bottom:1px solid var(--color-border); font-size:13px; }
   .panel-row:last-child { border-bottom:none; }
@@ -1276,9 +1296,43 @@
   // Reads use JSONP (a <script> tag) because Apps Script doesn't reliably
   // send CORS headers, which blocks a normal cross-origin fetch(). Every
   // read is authenticated with the signed session token.
+  // RC7.1: every full read is numbered when it is SENT. A read sent before a
+  // save was confirmed may arrive after it with older data; applyRemoteSnapshot
+  // uses this number to keep the newer confirmed record (see recentConfirmed).
+  var readSeqIssued = 0;
   function apiGetAll(){
     if (!scriptConfigured()) return Promise.reject(new Error('not configured'));
-    return jsonp('action=all&token=' + encodeURIComponent(state.sessionToken||''));
+    var seq = ++readSeqIssued;
+    return jsonp('action=all&token=' + encodeURIComponent(state.sessionToken||'')).then(function(d){
+      if (d && typeof d === 'object'){ try { Object.defineProperty(d, '__seq', { value: seq, enumerable: false }); } catch(e){} }
+      return d;
+    });
+  }
+  // RC7.1: records this session has CONFIRMED (saved or deleted) since the
+  // reads now in flight were sent. key 'sheet:id' -> { seq, version, deleted }.
+  // seq = the number of the last read sent before the confirmation; only a
+  // read with that number or lower can be older than the confirmed record.
+  var recentConfirmed = {};
+  function noteConfirmed(sheetName, rec, deleted){
+    if (!sheetName || !rec || rec.id == null) return;
+    recentConfirmed[sheetName + ':' + rec.id] = { sheet: sheetName, id: String(rec.id), seq: readSeqIssued, version: Number(rec._version) || 0, deleted: !!deleted };
+  }
+  // Applied to the record maps a snapshot is about to install. A snapshot
+  // sent AFTER a confirmation is authoritative (and retires the entry). One
+  // sent BEFORE it never replaces the confirmed record with an older version
+  // or drops it; a newer version from another employee is always applied.
+  function protectConfirmed(maps, snapSeq){
+    Object.keys(recentConfirmed).forEach(function(k){
+      var e = recentConfirmed[k];
+      if (snapSeq > e.seq){ delete recentConfirmed[k]; return; }
+      var key = STATE_KEY_FOR_SHEET[e.sheet], map = maps[key];
+      if (!map) return;
+      var snapRec = map[e.id];
+      if (e.deleted){ if (snapRec && (Number(snapRec._version) || 0) <= e.version) delete map[e.id]; return; }
+      var local = state[key] ? state[key][e.id] : null;
+      if (!local) return;
+      if (!snapRec || (Number(snapRec._version) || 0) < e.version) map[e.id] = local;
+    });
   }
   function apiLogin(idToken){
     if (!scriptConfigured()) return Promise.reject(new Error('not configured'));
@@ -1305,6 +1359,7 @@
 
   function setSyncBadge(status){
     state.syncStatus = status;
+    state.syncStatusRefreshes = 0;
     var el2 = document.getElementById('sync-status');
     if (!el2) return;
     var map = {
@@ -1322,19 +1377,46 @@
     var pill = document.getElementById('sync-pill');
     if (pill){ pill.innerHTML = map[status] || ''; pill.classList.toggle('show', !!map[status] && status !== 'idle'); pill.setAttribute('data-status', status); }
   }
-  function scheduleIdle(){ setTimeout(function(){ if (state.syncStatus==='saved') setSyncBadge('idle'); }, 2500); }
+  // RC7.2: each new "Saved ✓" restarts the 2.5 s timer, so an earlier save's
+  // timer can never cut a later confirmation short.
+  var idleTimer = null;
+  function scheduleIdle(){ if (idleTimer) clearTimeout(idleTimer); idleTimer = setTimeout(function(){ idleTimer = null; if (state.syncStatus==='saved') setSyncBadge('idle'); }, 2500); }
+  // RC7.1b: the 20-second background refresh may only report "Synced" (or
+  // "Saved on this device only" when it fails) if that cannot hide an active
+  // status. "Saving…"/"Not synced — retrying" are never replaced (the save
+  // itself always finishes with Saved/Not synced/Conflict); "Saved ✓" is left
+  // to scheduleIdle; "Not synced"/"Conflict" stay while a form or dialog is
+  // open or any opportunity change is still queued, in flight or parked, and
+  // in any case until the second refresh after it
+  // appeared (20–40 s; counted in refreshes, not by the device clock).
+  function refreshSetsBadge(status){
+    var s = state.syncStatus;
+    if (s === 'saving' || s === 'retrying' || s === 'saved') return;
+    if (s === 'failed' || s === 'conflict'){
+      if ((state.syncStatusRefreshes = (state.syncStatusRefreshes || 0) + 1) < 2) return;   // survives the first refresh after it was shown
+      var mb = document.getElementById('modal-backdrop');
+      if (mb && !mb.hidden) return;
+      var busy = function(m){ return Object.keys(m).some(function(k){ return !!m[k]; }); };
+      if (busy(dealWriteQueue) || busy(dealWriteInFlight) || busy(dealWriteBlocked) || busy(dealPendingFields)) return;
+    }
+    setSyncBadge(status);
+  }
 
   // Handles an authorization failure surfaced by any read/write: expired
   // session, deactivated account, or an account removed from the Users
   // sheet. Does NOT tear down the page — an open form keeps whatever the
   // employee was doing; they just need to sign in again to keep syncing.
   function handleAuthError(errCode){
-    if (errCode !== 'expired' && errCode !== 'deactivated' && errCode !== 'not_authorized') return false;
+    // RC7 (F3): every session problem the server can report sends the
+    // employee to sign in again (previously bad_signature / bad_token /
+    // no_token / bad_payload were shown as a connection problem).
+    if (['expired','deactivated','not_authorized','bad_signature','bad_token','no_token','bad_payload'].indexOf(errCode) === -1) return false;
     state.sessionToken = null;
     try { sessionStorage.removeItem('sgc-session'); } catch(e){}
     var msg = errCode === 'deactivated' ? 'Your CRM access has been deactivated. Contact your administrator.'
       : errCode === 'not_authorized' ? 'This account is no longer authorized. Contact your administrator.'
-      : 'Your session expired — please sign in again to keep syncing.';
+      : errCode === 'expired' ? 'Your session expired — please sign in again to keep syncing.'
+      : 'Your sign-in is no longer valid — please sign in again to keep syncing.';
     showReauthBanner(msg);
     return true;
   }
@@ -1347,6 +1429,10 @@
 
   // ---------- confirmed writes (Saving... -> Saved / Not synced) ----------
   function confirmedWrite(sheetName, id, data, expectedVersion, options){
+    // RC7 (F1/F2): an edit form sends the version it was OPENED with (and a
+    // create sends 0), never a version refreshed in the background, so the
+    // server's version check can catch another employee's change.
+    if (options && options.baseVersion !== undefined && options.baseVersion !== null) expectedVersion = Number(options.baseVersion) || 0;
     setSyncBadge('saving');
     var startedAt = Date.now();
     var postBody = { action:'saveRecord', sheet:sheetName, id:id, data:data, expectedVersion:expectedVersion };
@@ -1411,11 +1497,11 @@
   // a definitive pre-write refusal -> 'failed' after one authoritative
   // read; everything else (unreadable, timeout, version_conflict, unknown
   // error, any mismatch) -> the original verifyWrite() re-read path.
-  // RC6.1: who wrote a record. Follow-ups are create-only and the server
-  // records the author as loggedBy/loggedAt (they have no updatedBy), so a
-  // follow-up is this user's own save when it is the version-1 record of a
-  // create (expectedVersion 0) logged by this user. Every other sheet keeps
-  // the original updatedBy rule.
+  // RC7.1c: who wrote a record, for the save's own reply. Follow-ups are
+  // create-only and the server records the author as loggedBy/loggedAt (they
+  // have no updatedBy), so a follow-up is this user's own save when it is the
+  // version-1 record of a create logged by this user (the same rule verifyWrite
+  // and ownRetryMatches already apply). Every other sheet keeps updatedBy.
   function savedByMe(sheetName, rec, me, expectedVersion){
     if (!rec || !me) return false;
     if (sheetName === 'followups') return (Number(expectedVersion) || 0) === 0 && Number(rec._version) === 1 && rec.loggedBy === me;
@@ -1446,6 +1532,7 @@
     }
     if (res && res.ok === false && res.error){
       if (handleAuthError(res.error)){ setSyncBadge('failed'); return { status:'failed', record:null, error: res.error }; }
+      if (res.error === 'version_conflict') return resolveVersionConflict(sheetName, id, data, expectedVersion, options, res);
       if (DEFINITIVE_SAVE_ERRORS[res.error]){
         // Nothing was written. One authoritative read so the screen — and
         // any duplicate explanation built from it — reflects the server.
@@ -1460,6 +1547,39 @@
     }
     return verifyWrite(sheetName, id, data, expectedVersion, startedAt, 0, options);
   }
+  // RC7 (F3): the server refused the write because the record is no longer
+  // at expectedVersion — nothing was written. One authoritative read, then:
+  //  - the record is exactly this employee's own earlier attempt of this
+  //    same save (a retry whose first try landed but was never confirmed:
+  //    created by me at version 1 for a create, or written by me at
+  //    expectedVersion + 1, with every submitted field matching) -> 'saved',
+  //    nothing written twice;
+  //  - otherwise a genuine conflict -> 'conflict' with the latest record and
+  //    who/when, so the form can show both versions. Never retried silently.
+  async function resolveVersionConflict(sheetName, id, data, expectedVersion, options, res){
+    var snap = null;
+    try { snap = await apiGetAll(); } catch(e){ snap = null; }
+    if (snap && !snap.ok && handleAuthError(snap.error)){ setSyncBadge('failed'); return { status:'failed', record:null, error: snap.error }; }
+    if (snap && snap.ok) applyRemoteSnapshot(snap);
+    var current = (snap && snap.ok ? (snap[sheetName]||[]).filter(function(r){ return String(r.id) === String(id); })[0] : null) || res.current || null;
+    var me = state.currentUser && state.currentUser.email;
+    if (current && me && ownRetryMatches(sheetName, current, data, expectedVersion, me)){
+      applyConfirmedRecord(sheetName, current);
+      setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle();
+      return { status:'saved', record: current };
+    }
+    setSyncBadge('conflict');
+    if (!(options && options.silent)) showConflictNotice(sheetName, current);
+    return { status:'conflict', record: current, error: 'version_conflict', detail: res };
+  }
+  function ownRetryMatches(sheetName, current, data, expectedVersion, me){
+    var v = Number(current._version) || 0, ev = Number(expectedVersion) || 0;
+    var mineWrite = ev === 0 ? (v === 1 && (current.createdBy === me || current.loggedBy === me)) : (v === ev + 1 && current.updatedBy === me);
+    if (!mineWrite) return false;
+    var META = { updatedAt:true, updatedBy:true, _version:true, createdAt:true, createdBy:true };
+    var fields = sheetName === 'deals' ? Object.keys(data).filter(function(k){ return !META[k]; }) : Object.keys(data);
+    return fields.every(function(k){ return savedFieldMatches(sheetName, k, current[k], data[k]); });
+  }
   // Puts a server-confirmed record into local state, keeping the same
   // protection applyRemoteSnapshot gives a deal with edits still queued
   // (its pending field values stay on screen; _version etc. come from the
@@ -1469,6 +1589,8 @@
     if (!state[key]) state[key] = {};
     if (sheetName === 'deals' && dealPendingFields[rec.id]) state.deals[rec.id] = Object.assign({}, rec, dealPendingFields[rec.id]);
     else state[key][rec.id] = rec;
+    noteConfirmed(sheetName, rec);
+    guardOwnWrite(sheetName, rec);
     persistLocal(); render();
   }
   // Tolerant equality for comparing a submitted field value against what the
@@ -1510,9 +1632,14 @@
     // regardless of that protection.
     var rawList = snap[sheetName] || [];
     var current = rawList.filter(function(r){ return String(r.id) === String(id); })[0] || (state[stateKey] ? state[stateKey][id] : null);
-    var mine = sheetName === 'followups'
-      ? !!current && savedByMe('followups', current, state.currentUser && state.currentUser.email, expectedVersion)   // RC6.1 (no time window: the id is unique to this form)
-      : current && current.updatedBy === (state.currentUser&&state.currentUser.email) && new Date(current.updatedAt).getTime() >= startedAt - 3000;
+    var meEmail = state.currentUser && state.currentUser.email;
+    // RC7 (F3): "this session's own write" is decided by the version it
+    // produced (expectedVersion + 1, or version 1 created by me for a create),
+    // with the original time window kept as a fallback — so a device clock a
+    // few seconds off no longer turns a real save into "not synced".
+    var mine = !!current && !!meEmail && (
+      (current.updatedBy === meEmail && (Number(current._version) === (Number(expectedVersion)||0) + 1 || new Date(current.updatedAt).getTime() >= startedAt - 3000)) ||
+      ((Number(expectedVersion)||0) === 0 && Number(current._version) === 1 && (current.createdBy === meEmail || current.loggedBy === meEmail)));
     // Deal patches routinely include updatedAt (set client-side as a rough
     // timestamp) even though handleSaveDeal() always regenerates it
     // server-side on every save — so comparing it exactly compares a
@@ -1529,6 +1656,10 @@
     var fieldsToVerify = sheetName === 'deals' ? Object.keys(data).filter(function(k){ return !DEAL_METADATA_FIELDS[k]; }) : Object.keys(data);
     var fieldsMatch = mine && fieldsToVerify.every(function(k){ return savedFieldMatches(sheetName, k, current[k], data[k]); });
     if (mine && fieldsMatch){
+      noteConfirmed(sheetName, current);
+      guardOwnWrite(sheetName, current);
+      // A payment can also update its opportunity in the same locked save.
+      if (sheetName === 'payments' && current.dealId) guardOwnWrite('deals', (snap.deals||[]).filter(function(d){ return String(d.id) === String(current.dealId); })[0]);
       setSyncBadge('saved'); if (sheetName === 'goals') flashSaved(); scheduleIdle();
       return { status:'saved', record: current };
     }
@@ -1546,10 +1677,45 @@
     setSyncBadge('failed');
     return { status:'failed', record: current };
   }
-  function confirmedDelete(sheetName, id){
+  // RC7 (Tier 2): a delete carries the version the employee was looking at
+  // (the server deletes only if nobody changed the record since) and the
+  // server's reply is read, so a refusal says WHY. Success is still only
+  // reported once a fresh read shows the record gone (verifyDelete).
+  async function confirmedDelete(sheetName, id, expectedVersion){
     setSyncBadge('saving');
-    apiPostRaw({ action:'deleteRecord', sheet:sheetName, id:id });
+    var body = { action:'deleteRecord', sheet:sheetName, id:id };
+    if (expectedVersion !== undefined && expectedVersion !== null) body.expectedVersion = Number(expectedVersion) || 0;
+    var res = await apiPostWithResponse(body);
+    if (res && res.ok === false && res.error && DELETE_REFUSALS[res.error]){
+      var snap = null;
+      try { snap = await apiGetAll(); } catch(e){ snap = null; }
+      if (snap && snap.ok) applyRemoteSnapshot(snap);
+      setSyncBadge('failed');
+      if (handleAuthError(res.error)) return { status:'failed', error: res.error };
+      var msg = deleteRefusalMessage(sheetName, res);
+      openInfoModal('Not deleted', msg);
+      return { status: res.error === 'version_conflict' ? 'conflict' : 'refused', error: res.error, message: msg };
+    }
+    // ok, already gone (not_found), or no readable reply: confirm with a fresh read.
     return verifyDelete(sheetName, id, 0);
+  }
+  // RC7.1: only these replies prove nothing was deleted. Anything else (a
+  // server error, e.g. flush_failed, or an unknown reply) is unconfirmed and
+  // is settled by a fresh read (verifyDelete), never reported either way blindly.
+  var DELETE_REFUSALS = { version_conflict:true, deal_has_payments:true, contact_has_linked_records:true, forbidden:true, lock_timeout:true,
+    payment_delete_not_allowed:true, invalid_request:true, expired:true, deactivated:true, not_authorized:true, bad_signature:true, bad_token:true, no_token:true, bad_payload:true };
+  function deleteRefusalMessage(sheetName, res){
+    var label = sheetName === 'contacts' ? 'contact' : sheetName === 'deals' ? 'opportunity' : sheetName === 'tasks' ? 'task' : 'record';
+    if (res.error === 'version_conflict'){
+      var who = res.updatedBy ? resolveTeamMemberName(res.updatedBy) : 'someone else';
+      var when = res.updatedAt ? new Date(res.updatedAt).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) : '';
+      return 'Nothing was deleted: ' + who + ' changed this ' + label + (when ? ' at ' + when : '') + ' after you opened it. Review the latest version before deleting.';
+    }
+    if (res.error === 'deal_has_payments') return 'Nothing was deleted: this opportunity has ' + (res.linkedPayments || 'one or more') + ' payment ' + (res.linkedPayments === 1 ? 'entry' : 'entries') + ' in the ledger. An opportunity with payments can\u2019t be deleted \u2014 archive it instead.';
+    if (res.error === 'contact_has_linked_records') return contactLinkedMessage({ deals: res.linkedDeals || 0, followups: res.linkedFollowups || 0 });
+    if (res.error === 'forbidden') return 'Nothing was deleted: your role doesn\u2019t allow deleting this ' + label + '.';
+    if (res.error === 'lock_timeout') return 'Nothing was deleted: the CRM was busy with other saves. Please try again.';
+    return 'Nothing was deleted (' + res.error + ').';
   }
   async function verifyDelete(sheetName, id, attempt){
     await sleep(800);
@@ -1563,7 +1729,7 @@
     applyRemoteSnapshot(snap);
     var stateKey = STATE_KEY_FOR_SHEET[sheetName];
     var stillThere = state[stateKey] && state[stateKey][id];
-    if (!stillThere){ setSyncBadge('saved'); scheduleIdle(); return; }
+    if (!stillThere){ noteConfirmed(sheetName, { id: id, _version: Number.MAX_SAFE_INTEGER }, true); setSyncBadge('saved'); scheduleIdle(); return; }
     if (attempt < 4){ setSyncBadge('retrying'); return verifyDelete(sheetName,id,attempt+1); }
     setSyncBadge('failed');
     openConfirmModal('Delete not confirmed', 'That record still exists on the server \u2014 the delete may have been blocked by your permissions, or the connection dropped. It has been restored to the shared version below.', 'OK', function(){});
@@ -1575,6 +1741,115 @@
       label + ' was changed by someone else while you were working on it, so your change was not applied (to avoid overwriting theirs). The screen now shows their latest version \u2014 please review it and re-apply your change if it\'s still needed.',
       'OK', function(){}
     );
+  }
+
+  // ---------- RC7 (F1): edit-form conflict protection ----------
+  // Each edit form remembers the record version and the field values it was
+  // OPENED with. Saving sends that version, so if another employee saved in
+  // the meantime the server refuses the write (nothing is overwritten). The
+  // form then reloads the latest record and shows: what they changed (kept),
+  // what you changed (re-applied only when you choose), and any field you
+  // BOTH changed — which is never decided automatically: you pick "Keep
+  // theirs" or "Use mine" for each before your changes can be re-applied.
+  var formGuard = null;
+  function guardRead(fields){
+    var o = {};
+    fields.forEach(function(f){ var e = document.getElementById(f[0]); o[f[0]] = e ? String(e.value) : null; });
+    return o;
+  }
+  function guardStart(cfg){
+    formGuard = { sheet: cfg.sheet, id: String(cfg.id), version: Number(cfg.version) || 0, fields: cfg.fields, reopen: cfg.reopen, base: guardRead(cfg.fields) };
+    return formGuard;
+  }
+  function guardActive(sheet, id){
+    var g = formGuard;
+    if (!g || g.sheet !== sheet || g.id !== String(id)) return null;
+    var first = document.getElementById(g.fields[0][0]);
+    return (first && first.isConnected) ? g : null;
+  }
+  // This employee's own confirmed write to the open record (e.g. a payment
+  // that updates the opportunity): the form's base moves forward ONLY when
+  // that write is the very next version, i.e. nobody else changed it in
+  // between. Otherwise the base stays put and the conflict is still caught.
+  function guardOwnWrite(sheet, rec){
+    var g = rec && guardActive(sheet, rec.id);
+    var me = state.currentUser && state.currentUser.email;
+    if (g && me && rec.updatedBy === me && Number(rec._version) === g.version + 1) g.version = Number(rec._version);
+  }
+  function guardSetBase(fieldId, value){ if (formGuard && formGuard.base.hasOwnProperty(fieldId)) formGuard.base[fieldId] = String(value == null ? '' : value); }
+  function guardLabel(fieldId){
+    var l = document.querySelector('label[for="' + fieldId + '"]');
+    return l ? l.textContent.trim() : fieldId;
+  }
+  function guardDisplay(fieldId, v){
+    var e = document.getElementById(fieldId);
+    if (e && e.tagName === 'SELECT'){ var o = Array.prototype.filter.call(e.options, function(x){ return x.value === v; })[0]; if (o) return o.textContent; }
+    return v === '' || v == null ? '(blank)' : v;
+  }
+  function guardSetInput(fieldId, v){
+    var e = document.getElementById(fieldId);
+    if (!e) return;
+    e.value = v;
+    e.dispatchEvent(new Event('input', { bubbles:true }));
+    e.dispatchEvent(new Event('change', { bubbles:true }));
+  }
+  // Called by an edit form when its save came back 'conflict'. Reloads the
+  // form from the latest record (cfg.reopen) and shows the resolution panel.
+  function guardHandleConflict(result, formId, submitLabel){
+    var g = formGuard;
+    if (!g) return false;
+    var mine = guardRead(g.fields), oldBase = g.base, fields = g.fields;
+    var latest = result && result.record ? result.record : null;
+    g.reopen();                                // fresh form + fresh guard from the latest record
+    var g2 = formGuard;
+    if (!g2 || g2 === g) return false;
+    var theirs = g2.base;
+    var mineOnly = [], theirsOnly = [], both = [];
+    fields.forEach(function(f){
+      var k = f[0];
+      if (!g2.base.hasOwnProperty(k) || mine[k] === null) return;
+      var iChanged = mine[k] !== oldBase[k], theyChanged = theirs[k] !== oldBase[k];
+      if (iChanged && theyChanged){ if (mine[k] !== theirs[k]) both.push(k); }
+      else if (iChanged) mineOnly.push(k);
+      else if (theyChanged) theirsOnly.push(k);
+    });
+    var who = (latest && (latest.updatedBy || '')) || (result && result.detail && result.detail.updatedBy) || 'another team member';
+    var when = latest && latest.updatedAt ? new Date(latest.updatedAt).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) : '';
+    var form = document.getElementById(formId);
+    if (!form) return true;
+    var box = document.createElement('div');
+    box.className = 'pay-warn';
+    box.id = 'conflict-panel';
+    var html = '<div><strong>Changed by ' + esc(resolveTeamMemberName(who)) + (when ? ' at ' + esc(when) : '') + ' while you were editing.</strong> Your changes were NOT saved. The form below now shows their latest version.</div>';
+    if (theirsOnly.length) html += '<div style="margin-top:6px;">Their changes (kept): ' + theirsOnly.map(function(k){ return esc(guardLabel(k)) + ' → ' + esc(guardDisplay(k, theirs[k])); }).join('; ') + '</div>';
+    if (mineOnly.length) html += '<div style="margin-top:6px;">Your changes (re-applied only if you choose Re-apply): ' + mineOnly.map(function(k){ return esc(guardLabel(k)) + ' → ' + esc(guardDisplay(k, mine[k])); }).join('; ') + '</div>';
+    if (both.length){
+      html += '<div style="margin-top:8px;"><strong>Changed by both of you — choose one value for each:</strong></div>';
+      both.forEach(function(k, i){
+        html += '<div class="conflict-field" data-field="' + esc(k) + '" style="margin-top:6px;"><div>' + esc(guardLabel(k)) + '</div>' +
+          '<label style="display:block;font-weight:400;"><input type="radio" name="cf-' + i + '" value="theirs"> Keep theirs: ' + esc(guardDisplay(k, theirs[k])) + '</label>' +
+          '<label style="display:block;font-weight:400;"><input type="radio" name="cf-' + i + '" value="mine"> Use mine: ' + esc(guardDisplay(k, mine[k])) + '</label></div>';
+      });
+    }
+    if (!mineOnly.length && !both.length) html += '<div style="margin-top:6px;">None of your edits differ from the latest version.</div>';
+    html += '<div class="pay-actions"><button type="button" class="btn btn-ghost btn-sm" id="cf-load-latest">Load latest (discard my changes)</button>' +
+      ((mineOnly.length || both.length) ? '<button type="button" class="btn btn-primary btn-sm" id="cf-reapply"' + (both.length ? ' disabled' : '') + '>Re-apply my changes</button>' : '') + '</div>';
+    box.innerHTML = html;
+    form.insertBefore(box, form.firstChild);
+    setModalStatus('conflict', 'Not saved — this record was changed by someone else. Choose Load latest or Re-apply my changes above.');
+    var reapply = document.getElementById('cf-reapply');
+    function choices(){ return both.map(function(k){ var c = box.querySelector('.conflict-field[data-field="' + k + '"] input:checked'); return c ? c.value : null; }); }
+    box.querySelectorAll('input[type="radio"]').forEach(function(r){ r.addEventListener('change', function(){ if (reapply) reapply.disabled = choices().some(function(c){ return !c; }); }); });
+    document.getElementById('cf-load-latest').addEventListener('click', function(){ box.remove(); setModalStatus(null, null); });
+    if (reapply) reapply.addEventListener('click', function(){
+      var ch = choices();
+      if (ch.some(function(c){ return !c; })) return;          // every shared field needs an explicit decision
+      mineOnly.forEach(function(k){ guardSetInput(k, mine[k]); });
+      both.forEach(function(k, i){ if (ch[i] === 'mine') guardSetInput(k, mine[k]); });
+      box.remove(); setModalStatus(null, null);
+      if (form.requestSubmit) form.requestSubmit(); else form.dispatchEvent(new Event('submit', { cancelable:true }));
+    });
+    return true;
   }
 
   // ---------- utils ----------
@@ -1860,6 +2135,8 @@
       var phone = contact && contact.phone != null ? String(contact.phone) : '';
       var phoneDigits = phone.replace(/[^0-9+]/g,'');
       var address = contact ? contact.address : '';
+      var serviceLoc = d.serviceAddress ? String(d.serviceAddress).trim() : '';   // RC7.2
+      var directionsTo = serviceLoc || address;
       var jt = JOB_TYPES.filter(function(j){ return j.id===d.jobType; })[0];
       var st = stageInfo(d.stage);
       var timeLabel = d.scheduledTime ? esc(tmFormatTime(d.scheduledTime)) : 'Time not set';
@@ -1874,11 +2151,12 @@
           field('Service', jt ? esc(jt.label) : '') +
           field('Vehicle', d.vehicle ? esc(d.vehicle) : '') +
           field('Technician', d.assignedTo ? esc(d.assignedTo) : '') +
-          field('Address', address ? esc(address) : '') +
+          field('Service location', serviceLoc ? esc(serviceLoc) : (address ? 'Not set (Directions use the customer address)' : '')) +
+          field('Customer address', address ? esc(address) : '') +
           '<div class="tm-actions">' +
             (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="tel:'+esc(phoneDigits)+'">'+tmIcon('call')+'Call</a>' : '') +
             (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="sms:'+esc(phoneDigits)+'">'+tmIcon('text')+'Text</a>' : '') +
-            (address ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(address)+'" target="_blank" rel="noopener">'+tmIcon('pin')+'Directions</a>' : '') +
+            (directionsTo ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(directionsTo)+'" target="_blank" rel="noopener">'+tmIcon('pin')+'Directions</a>' : '') +
             '<button type="button" class="btn btn-primary btn-sm" data-open="'+esc(d.id)+'">'+tmIcon('open')+'Open job</button>' +
           '</div>' +
         '</div>'
@@ -2055,19 +2333,32 @@
   // a fresh server read shows it is gone. Resolves to
   // { status:'deleted' } | { status:'blocked', links } | { status:'failed' }.
   // Never touches any Deal or Followup.
-  async function deleteContact(id){
+  async function deleteContact(id, expectedVersion){
     setSyncBadge('saving');
     var snap;
     try { snap = await apiGetAll(); } catch(e){ snap = null; }
     if (snap && !snap.ok && handleAuthError(snap.error)) return { status:'failed' };
     if (snap && snap.ok){
       applyRemoteSnapshot(snap);
-      if (!state.contacts[id]){ setSyncBadge('saved'); scheduleIdle(); return { status:'deleted' }; }
+      if (!state.contacts[id]){ noteConfirmed('contacts', { id: id, _version: Number.MAX_SAFE_INTEGER }, true); setSyncBadge('saved'); scheduleIdle(); return { status:'deleted' }; }
       var pre = countContactLinks(snap, id);
       // The backend would refuse this delete; don't send it.
       if (pre.deals || pre.followups){ setSyncBadge('idle'); return { status:'blocked', links: pre }; }
     }
-    apiPostRaw({ action:'deleteRecord', sheet:'contacts', id:id });
+    // RC7 (Tier 2): send the version the employee was looking at and read
+    // the server's reply, so a refusal (changed by someone else, linked
+    // records, permission, busy) is reported precisely.
+    var delBody = { action:'deleteRecord', sheet:'contacts', id:id };
+    if (expectedVersion !== undefined && expectedVersion !== null) delBody.expectedVersion = Number(expectedVersion) || 0;
+    var delRes = await apiPostWithResponse(delBody);
+    if (delRes && delRes.ok === false && delRes.error && DELETE_REFUSALS[delRes.error]){
+      try { snap = await apiGetAll(); } catch(e){ snap = null; }
+      if (snap && snap.ok) applyRemoteSnapshot(snap);
+      if (handleAuthError(delRes.error)) return { status:'failed' };
+      if (delRes.error === 'contact_has_linked_records'){ setSyncBadge('idle'); return { status:'blocked', links: { deals: delRes.linkedDeals || 0, followups: delRes.linkedFollowups || 0 } }; }
+      setSyncBadge('failed');
+      return { status: delRes.error === 'version_conflict' ? 'conflict' : 'refused', message: deleteRefusalMessage('contacts', delRes) };
+    }
     for (var attempt = 0; attempt < 5; attempt++){
       await sleep(800);
       try { snap = await apiGetAll(); } catch(e){ snap = null; }
@@ -2077,7 +2368,7 @@
         continue;
       }
       applyRemoteSnapshot(snap);
-      if (!state.contacts[id]){ setSyncBadge('saved'); scheduleIdle(); return { status:'deleted' }; }
+      if (!state.contacts[id]){ noteConfirmed('contacts', { id: id, _version: Number.MAX_SAFE_INTEGER }, true); setSyncBadge('saved'); scheduleIdle(); return { status:'deleted' }; }
       // Still there: if a link exists now (e.g. added a moment ago by
       // someone else), that is why the backend refused it.
       var links = countContactLinks(snap, id);
@@ -2120,6 +2411,13 @@
   // applyRemoteSnapshot overlays exactly these fields so a poll can't erase
   // them, while _version and everything else still updates from the server.
   var dealPendingFields = {};
+  var dealWritePromise = {};   // RC7: the in-flight write for a deal, so an edit form can wait for it
+  // RC7 (F1): resolves once no write for this deal is in flight. Returns
+  // false if an earlier write is parked unconfirmed (dealWriteBlocked).
+  async function waitDealIdle(id){
+    for (var i = 0; i < 40 && dealWriteInFlight[id] && dealWritePromise[id]; i++){ try { await dealWritePromise[id]; } catch(e){} }
+    return !dealWriteInFlight[id] && !dealWriteBlocked[id];
+  }
   function updateDeal(id, patch, options){
     var existing = state.deals[id];
     // Optimistic field-level update always happens immediately, whether or
@@ -2140,6 +2438,10 @@
       var mergedOpts = Object.assign({}, priorOpts, options || {});
       if (priorOpts.invoiceOverpaymentConfirmed || (options && options.invoiceOverpaymentConfirmed)) mergedOpts.invoiceOverpaymentConfirmed = true;
       if (priorOpts.legacyMismatchConfirmed || (options && options.legacyMismatchConfirmed)) mergedOpts.legacyMismatchConfirmed = true;
+      // RC7: a queued patch is always sent against the latest confirmed
+      // version (quick actions); an edit form never queues (it waits, see
+      // waitDealIdle), so a form's opened-with version is never carried here.
+      delete mergedOpts.baseVersion;
       dealWriteQueue[id] = { patch: Object.assign({}, priorQueued, patch), options: mergedOpts };
       return Promise.resolve({ status:'queued' });
     }
@@ -2147,7 +2449,7 @@
     dealWriteInFlight[id] = true;
     var expectedVersion = existing ? (existing._version||0) : 0;
     var sentPatch = patch;
-    return confirmedWrite('deals', id, patch, expectedVersion, options).then(function(result){
+    return (dealWritePromise[id] = confirmedWrite('deals', id, patch, expectedVersion, options).then(function(result){
       dealWriteInFlight[id] = false;
       // This write's own fields are no longer pending, UNLESS a queued
       // patch also touched them — then the queued value should keep being
@@ -2169,7 +2471,7 @@
       }
       dispatchQueuedDealWrite(id, result.status, result.record);
       return result;
-    });
+    }));
   }
   // Runs once the in-flight write for `id` has settled. Decides what to do
   // with anything queued behind it while it was pending.
@@ -2213,10 +2515,11 @@
     dealWriteBlocked[id] = false;
     updateDeal(id, queued.patch, queued.options);
   }
-  function deleteDeal(id){
+  function deleteDeal(id, expectedVersion){
+    if (expectedVersion === undefined && state.deals[id]) expectedVersion = state.deals[id]._version;
     delete state.deals[id];
     persistLocal(); render();
-    confirmedDelete('deals', id);
+    return confirmedDelete('deals', id, expectedVersion);
   }
   function saveGoalsForMonth(monthKey, data){
     var existing = state.goalsHistory[monthKey];
@@ -2236,11 +2539,180 @@
     return confirmedWrite('tasks', finalId, data, expectedVersion, options);
   }
   function saveFollowup(data, options, stableId){
-    var finalId = stableId || uid();   // RC6.1: one id per Log follow-up form, so a retry is recognised, never logged twice
+    var finalId = stableId || uid();   // RC7 (F2): one id per Log follow-up form, so a retry never logs it twice
     var merged = Object.assign({}, data, { id: finalId });
     state.followups[finalId] = merged;
     persistLocal();
-    return confirmedWrite('followups', finalId, data, 0, options);
+    return confirmedWrite('followups', finalId, data, 0, Object.assign({}, options || {}, { baseVersion: 0 }));
+  }
+  // ---------- RC7.2: Follow-up History ----------
+  // Read-only view of the FollowUps sheet (state.followups, refreshed every
+  // 20 s). Only server rows are listed: a row from the server always has a
+  // _version; the optimistic local copy saveFollowup() keeps while a save is
+  // unconfirmed has none, so nothing unconfirmed is ever shown as history.
+  var FU_HISTORY_DEFAULT = 3;
+  var fuWhenFmt_ = null;
+  function fmtFollowupWhen(iso){
+    var d = iso ? new Date(iso) : null;
+    if (!d || isNaN(d.getTime())) return 'Date unknown';
+    if (!fuWhenFmt_) fuWhenFmt_ = new Intl.DateTimeFormat('en-US', { timeZone: BUSINESS_TZ, month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' });
+    return fuWhenFmt_.format(d);
+  }
+  // scope: { dealId } -> that opportunity's follow-ups; { contactId } -> the
+  // customer's follow-ups, including those logged on any of their
+  // opportunities (older rows may carry only the opportunity id).
+  function followupsFor(scope){
+    // row = position in the FollowUps sheet (rows are only ever appended), the
+    // tie-break when two entries carry the same time.
+    var list = Object.keys(state.followups).map(function(k, i){ var f = state.followups[k]; return f ? { f: f, row: i } : null; }).filter(function(x){ return x && x.f._version; });
+    if (scope.dealId){
+      list = list.filter(function(x){ return String(x.f.dealId || '') === String(scope.dealId); });
+    } else {
+      var dealIds = {};
+      Object.keys(state.deals).forEach(function(k){ if (String(state.deals[k].contactId || '') === String(scope.contactId)) dealIds[k] = true; });
+      list = list.filter(function(x){ return String(x.f.contactId || '') === String(scope.contactId) || (x.f.dealId && dealIds[x.f.dealId]); });
+    }
+    list.sort(function(a, b){
+      var ta = Date.parse(a.f.loggedAt) || 0, tb = Date.parse(b.f.loggedAt) || 0;
+      return tb - ta || b.row - a.row;
+    });
+    return list.map(function(x){ return x.f; });
+  }
+  function renderFollowupHistoryList(box){
+    if (!box || !box.isConnected) return;
+    var scope = box.getAttribute('data-fh-deal') ? { dealId: box.getAttribute('data-fh-deal') } : { contactId: box.getAttribute('data-fh-contact') };
+    var list = followupsFor(scope);
+    var expanded = box.getAttribute('data-fh-expanded') === '1';
+    var shown = expanded ? list : list.slice(0, FU_HISTORY_DEFAULT);
+    var countEl = box.parentNode && box.parentNode.querySelector('.fh-count');
+    if (countEl) countEl.textContent = list.length;
+    if (!list.length){ box.innerHTML = '<div class="fh-empty">No follow-ups logged yet.</div>'; return; }
+    box.innerHTML = shown.map(function(f){
+      var job = '';
+      if (!scope.dealId && f.dealId){
+        var dd = state.deals[f.dealId];
+        job = '<span class="fh-job">Job: ' + esc(dd ? (dd.title || 'Untitled job') : 'Deleted opportunity') + '</span>';
+      }
+      return '<div class="fh-item" data-fh-id="' + esc(f.id) + '">' +
+        '<div class="fh-meta"><span class="fh-type">' + esc(f.type || 'Follow-up') + '</span><span class="fh-when">' + esc(fmtFollowupWhen(f.loggedAt)) + '</span>' +
+        '<span class="fh-by">' + esc(f.loggedBy || 'Unknown') + '</span>' + job + '</div>' +
+        (f.note ? '<div class="fh-note">' + esc(f.note) + '</div>' : '<div class="fh-note empty">(no note)</div>') +
+      '</div>';
+    }).join('') +
+    (list.length > FU_HISTORY_DEFAULT ? '<button type="button" class="btn btn-ghost btn-sm fh-toggle">' + (expanded ? 'Show the 3 most recent' : 'Show all ' + list.length + ' follow-ups') + '</button>' : '');
+    var t = box.querySelector('.fh-toggle');
+    if (t) t.addEventListener('click', function(){ box.setAttribute('data-fh-expanded', expanded ? '0' : '1'); renderFollowupHistoryList(box); });
+  }
+  // Re-draws every history list on screen (after a refresh or a confirmed
+  // save). Only the list is redrawn, never the inputs of the card.
+  function refreshOpenFollowupHistories(){
+    Array.prototype.forEach.call(document.querySelectorAll('[data-fh-list]'), renderFollowupHistoryList);
+  }
+  // The History section's HTML: inline logging (type, note, Log) + the list.
+  function followupSectionHtml(prefix, scope){
+    return '<div class="fh-section" id="' + prefix + '-fh">' +
+      '<div class="section-label">Follow-up history <span class="count-badge fh-count">0</span></div>' +
+      '<div class="fh-log">' +
+        '<div class="form-field full" style="margin:0;"><label for="' + prefix + '-fh-type">Follow-up type</label><select id="' + prefix + '-fh-type">' + FOLLOWUP_TYPES.map(function(t){ return '<option value="' + esc(t) + '">' + esc(t) + '</option>'; }).join('') + '</select></div>' +
+        '<div class="form-field full" style="margin:0;"><label for="' + prefix + '-fh-note">Follow-up note (optional)</label><textarea id="' + prefix + '-fh-note" placeholder="e.g. Called customer — waiting on insurance approval."></textarea></div>' +
+        '<div class="fh-log-row"><button type="button" class="btn btn-primary btn-sm" id="' + prefix + '-fh-log">Log follow-up</button><div class="fh-status" id="' + prefix + '-fh-status" role="status" aria-live="polite"></div></div>' +
+      '</div>' +
+      '<div data-fh-list="1" ' + (scope.dealId ? 'data-fh-deal="' + esc(scope.dealId) + '"' : 'data-fh-contact="' + esc(scope.contactId) + '"') + ' id="' + prefix + '-fh-list"></div>' +
+    '</div>';
+  }
+  // Wires the inline logger. Same save path as Log follow-up in RC7.1c:
+  // one id per entry (a retry is recognised, never logged twice), confirmed
+  // by the server's reply or a fresh read, and Type/Note locked after an
+  // unconfirmed attempt. Nothing else in the card is touched.
+  function mountFollowupLogger(prefix, contactId, dealId){
+    var btn = document.getElementById(prefix + '-fh-log');
+    var typeEl = document.getElementById(prefix + '-fh-type');
+    var noteEl = document.getElementById(prefix + '-fh-note');
+    var statusEl = document.getElementById(prefix + '-fh-status');
+    var listEl = document.getElementById(prefix + '-fh-list');
+    if (!btn || !typeEl || !noteEl || !statusEl || !listEl) return;
+    renderFollowupHistoryList(listEl);
+    var followupId = uid();
+    var setStatus = function(kind, text){ statusEl.className = 'fh-status' + (kind ? ' ' + kind : ''); statusEl.textContent = text || ''; };
+    // Any edit after a confirmed entry clears the old confirmation.
+    var clearOk = function(){ if (/\bok\b/.test(statusEl.className)) setStatus(null, ''); };
+    typeEl.addEventListener('change', clearOk); noteEl.addEventListener('input', clearOk);
+    btn.addEventListener('click', async function(){
+      if (btn.disabled) return;
+      btn.disabled = true;
+      setStatus(null, 'Logging…');
+      var result = await saveFollowup({ contactId: contactId || null, dealId: dealId || null, type: typeEl.value, note: noteEl.value.trim() }, { silent: true }, followupId);
+      btn.disabled = false;
+      if (result.status === 'saved'){
+        followupId = uid();                       // the next entry is a new follow-up
+        typeEl.disabled = false; noteEl.readOnly = false;
+        noteEl.value = ''; typeEl.selectedIndex = 0;
+        setStatus('ok', 'Follow-up logged ✓');
+        renderFollowupHistoryList(listEl);
+      } else {
+        // The retry must send exactly what may already have been logged.
+        typeEl.disabled = true; noteEl.readOnly = true;
+        if (result.status === 'conflict') setStatus('err', 'That didn’t sync as expected. Nothing has been lost — click Log follow-up again to retry (it will not be logged twice).');
+        else setStatus('err', 'Not synced — check your connection and click Log follow-up again. Nothing has been lost.');
+      }
+    });
+  }
+  // ---------- RC7.2: Customer address from the Opportunity card ----------
+  // The address is a field of the CONTACT. It is saved on its own (Save
+  // address), against the Contact version shown when editing started, with
+  // the same confirmation, retry and conflict rules as every other save, and
+  // never as part of the opportunity's Save changes. A Technician may use
+  // it too: the backend accepts an address-only change from a Technician.
+  function mountCustomerAddressEditor(contactId){
+    var view = document.getElementById('dm-cust-addr-view');
+    if (!view) return;
+    var editBtn = document.getElementById('dm-cust-addr-edit'), editor = document.getElementById('dm-cust-addr-editor');
+    var input = document.getElementById('dm-cust-addr-input'), saveBtn = document.getElementById('dm-cust-addr-save');
+    var cancelBtn = document.getElementById('dm-cust-addr-cancel'), statusEl = document.getElementById('dm-cust-addr-status');
+    var conflictEl = document.getElementById('dm-cust-addr-conflict');
+    var baseVersion = null;
+    var setStatus = function(kind, text){ statusEl.className = 'addr-status' + (kind ? ' ' + kind : ''); statusEl.textContent = text || ''; };
+    var showView = function(){
+      var c = state.contacts[contactId];
+      var a = c && c.address ? String(c.address) : '';
+      view.innerHTML = a ? '<a href="https://maps.google.com/?q=' + encodeURIComponent(a) + '" target="_blank" rel="noopener">' + esc(a) + '</a>' : '<span class="addr-hint">No customer address on file</span>';
+    };
+    var closeEditor = function(){ editor.hidden = true; conflictEl.hidden = true; conflictEl.innerHTML = ''; editBtn.hidden = false; baseVersion = null; showView(); };
+    showView();
+    editBtn.addEventListener('click', function(){
+      var c = state.contacts[contactId];
+      if (!c){ setStatus('err', 'This contact isn’t available right now.'); return; }
+      baseVersion = Number(c._version) || 0;
+      input.value = c.address || ''; input.readOnly = false;
+      editor.hidden = false; editBtn.hidden = true; setStatus(null, ''); input.focus();
+    });
+    cancelBtn.addEventListener('click', function(){ setStatus(null, ''); closeEditor(); });
+    var save = async function(){
+      if (saveBtn.disabled) return;
+      var value = input.value.trim();
+      saveBtn.disabled = true; setStatus(null, 'Saving address…');
+      var result = await saveContact(contactId, { address: value }, { silent: true, baseVersion: baseVersion });
+      saveBtn.disabled = false;
+      if (result.status === 'saved'){ setStatus('ok', 'Customer address saved ✓'); closeEditor(); return; }
+      if (result.status === 'conflict'){
+        var cur = result.record || state.contacts[contactId] || {};
+        var theirs = String(cur.address || '');
+        if (theirs.trim() === value){ setStatus('ok', 'Customer address saved ✓'); closeEditor(); return; }   // same address already saved
+        setStatus('err', 'Someone else changed this customer’s contact record while you were editing. Nothing was overwritten.');
+        conflictEl.hidden = false;
+        conflictEl.innerHTML = '<div class="addr-hint" style="margin-top:6px;">Saved address' + (cur.updatedBy ? ' (by ' + esc(cur.updatedBy) + ')' : '') + ': <strong>' + esc(theirs || '(blank)') + '</strong><br>Yours: <strong>' + esc(value || '(blank)') + '</strong></div>' +
+          '<div class="fh-log-row" style="margin-top:6px;"><button type="button" class="btn btn-ghost btn-sm" id="dm-cust-addr-theirs">Keep saved address</button><button type="button" class="btn btn-primary btn-sm" id="dm-cust-addr-mine">Use my address</button></div>';
+        document.getElementById('dm-cust-addr-theirs').addEventListener('click', function(){ setStatus(null, ''); closeEditor(); });
+        document.getElementById('dm-cust-addr-mine').addEventListener('click', function(){
+          baseVersion = Number(cur._version) || baseVersion;   // explicit choice: re-apply on top of the latest version
+          conflictEl.hidden = true; conflictEl.innerHTML = ''; save();
+        });
+        return;
+      }
+      if (result.error === 'forbidden') setStatus('err', 'You don’t have permission to change this address.');
+      else setStatus('err', 'Not synced — check your connection and click Save address again. Nothing you entered has been lost.');
+    };
+    saveBtn.addEventListener('click', save);
   }
   var ATTACHMENT_ALLOWED_TYPES = { 'image/jpeg':true, 'image/png':true, 'image/webp':true, 'image/heic':true, 'image/heif':true, 'application/pdf':true };
   var ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
@@ -2316,10 +2788,11 @@
     persistLocal(); render();
     return confirmedWrite('meta', 'dailyWeeklyTargets', data, expectedVersion, options);
   }
-  function deleteTask(id){
+  function deleteTask(id, expectedVersion){
+    if (expectedVersion === undefined && state.tasks[id]) expectedVersion = state.tasks[id]._version;
     delete state.tasks[id];
     persistLocal(); render();
-    confirmedDelete('tasks', id);
+    return confirmedDelete('tasks', id, expectedVersion);
   }
   function flashSaved(elId){
     var flash = document.getElementById(elId || 'goals-flash');
@@ -2367,13 +2840,18 @@
     var goalsMap = {}; (data.goals||[]).forEach(function(g){ goalsMap[g.id] = g; });
     var followupsMap = {}; (data.followups||[]).forEach(function(f){ followupsMap[f.id] = f; });
     var paymentsMap = {}; (data.payments||[]).forEach(function(p){ paymentsMap[p.id] = p; });
+    var metaMapEarly = {}; (data.meta||[]).forEach(function(m){ metaMapEarly[m.id] = m; });
+    // RC7.1: a snapshot sent before this session's latest confirmed saves
+    // never rolls those records back (see protectConfirmed).
+    protectConfirmed({ contacts: contactsMap, deals: dealsMap, tasks: tasksMap, goalsHistory: goalsMap, followups: followupsMap, payments: paymentsMap, metaRecords: metaMapEarly },
+      typeof data.__seq === 'number' ? data.__seq : Infinity);
     state.contacts = contactsMap;
     state.deals = dealsMap;
     state.tasks = tasksMap;
     state.followups = followupsMap;
     state.payments = paymentsMap;
     if (Object.keys(goalsMap).length) state.goalsHistory = goalsMap;
-    var metaMap = {}; (data.meta||[]).forEach(function(m){ metaMap[m.id] = m; });
+    var metaMap = metaMapEarly;
     state.metaRecords = metaMap;
     // Daily/Weekly activity targets reuse the existing generic "meta" sheet
     // (id/json/updatedAt) rather than adding new columns to Monthly Goals —
@@ -2525,6 +3003,7 @@
     if (state.view === 'goals') renderGoals();
     if (state.view === 'users') renderUsers();
     renderDbBanner();
+    refreshOpenFollowupHistories();   // RC7.2: open cards show newly logged follow-ups
   }
   function renderDbBanner(){
     var b = document.getElementById('db-banner');
@@ -3890,7 +4369,7 @@
       'Merge ' + groups.length + ' duplicate opportunit' + (groups.length===1?'y':'ies') + '?',
       'This keeps the oldest record of each and removes ' + totalDupes + ' duplicate job' + (totalDupes===1?'':'s') + ' that match on contact, job description, vehicle, and amount. This can\'t be undone.',
       'Merge duplicates',
-      function(){ groups.forEach(function(group){ for (var i=1;i<group.length;i++){ deleteDeal(group[i].id); } }); }
+      function(){ groups.forEach(function(group){ for (var i=1;i<group.length;i++){ deleteDeal(group[i].id, group[i]._version); } }); }
     );
   }
 
@@ -4155,6 +4634,8 @@
     var phone = contact && contact.phone != null ? String(contact.phone) : '';
     var phoneDigits = phone.replace(/[^0-9+]/g,'');
     var address = contact ? contact.address : '';
+    var serviceLoc = d.serviceAddress ? String(d.serviceAddress).trim() : '';   // RC7.2
+    var directionsTo = serviceLoc || address;
     var jt = JOB_TYPES.filter(function(j){ return j.id===d.jobType; })[0];
     var timeLabel = d.scheduledTime ? esc(tmFormatTime(d.scheduledTime)) : 'Time not set';
     function field(label, value){
@@ -4170,10 +4651,11 @@
         '<div class="tm-top-row"><div class="tm-appt-time'+(d.scheduledTime?'':' unset')+'">'+timeLabel+'</div></div>' +
         field('Customer', customerName ? esc(customerName) : '') +
         field('Service', jt ? esc(jt.label) : '') +
-        field('Address', address ? esc(address) : '') +
+        field('Service location', serviceLoc ? esc(serviceLoc) : (address ? 'Not set (Directions use the customer address)' : '')) +
+        field('Customer address', address ? esc(address) : '') +
         '<div class="tm-actions">' +
           (phoneDigits ? '<a class="btn btn-ghost btn-sm" href="tel:'+esc(phoneDigits)+'">'+tmIcon('call')+'Call</a>' : '') +
-          (address ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(address)+'" target="_blank" rel="noopener">'+tmIcon('pin')+'Directions</a>' : '') +
+          (directionsTo ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(directionsTo)+'" target="_blank" rel="noopener">'+tmIcon('pin')+'Directions</a>' : '') +
         '</div>' +
       '</div>'
     );
@@ -4838,7 +5320,7 @@
     backdrop.hidden = false;
     document.getElementById('lf-close').addEventListener('click', closeModal);
     document.getElementById('lf-cancel').addEventListener('click', closeModal);
-    var followupId = uid();   // RC6.1: stable for every retry of this entry
+    var followupId = uid();   // RC7 (F2): stable for every retry of this entry
     document.getElementById('log-followup-form').addEventListener('submit', async function(e){
       e.preventDefault();
       var submitBtn = e.target.querySelector('button[type="submit"]');
@@ -4848,11 +5330,11 @@
       setModalStatus(null, null);
       var result = await saveFollowup({ contactId: contactId||null, dealId: dealId||null, type: type, note: note }, { silent: true }, followupId);
       if (submitBtn) submitBtn.disabled = false;
-      // RC6.1: after an unconfirmed attempt the retry must send exactly what
+      // RC7.1c: after an unconfirmed attempt the retry must send exactly what
       // may already have been logged under this id, so Type and Note are locked.
       if (result.status !== 'saved'){ document.getElementById('lf-type').disabled = true; document.getElementById('lf-note').readOnly = true; }
       if (result.status === 'saved'){ closeModal(); }
-      else if (result.status === 'conflict'){ setModalStatus('conflict', 'That didn\u2019t sync as expected. Nothing has been lost \u2014 click Log follow-up again to retry.'); }
+      else if (result.status === 'conflict'){ setModalStatus('conflict', 'That didn\u2019t sync as expected. Nothing has been lost \u2014 click Log follow-up again to retry (it will not be logged twice).'); }
       else { setModalStatus('failed', 'Not synced \u2014 check your connection and click Log follow-up again. Nothing has been lost.'); }
     });
   }
@@ -4869,16 +5351,18 @@
     backdrop.hidden = false;
     document.getElementById('tn-close').addEventListener('click', closeModal);
     document.getElementById('tn-cancel').addEventListener('click', closeModal);
+    guardStart({ sheet:'tasks', id: taskId, version: t._version, fields: [['tn-notes']], reopen: function(){ openTaskNoteModal(taskId); } });
     document.getElementById('task-note-form').addEventListener('submit', async function(e){
       e.preventDefault();
       var submitBtn = e.target.querySelector('button[type="submit"]');
       var notes = document.getElementById('tn-notes').value.trim();
+      var g = guardActive('tasks', taskId);
       if (submitBtn) submitBtn.disabled = true;
       setModalStatus(null, null);
-      var result = await saveTask(taskId, { notes: notes }, { silent:true });
+      var result = await saveTask(taskId, { notes: notes }, { silent:true, baseVersion: g ? g.version : undefined });
       if (submitBtn) submitBtn.disabled = false;
       if (result.status === 'saved'){ closeModal(); }
-      else if (result.status === 'conflict'){ setModalStatus('conflict', 'Someone else updated this task while you were editing. Your note above is unchanged \u2014 click Save note again to apply it, or Cancel to review the latest version first.'); }
+      else if (result.status === 'conflict'){ if (!guardHandleConflict(result, 'task-note-form')) setModalStatus('conflict', 'Someone else updated this task while you were editing. Your note was not saved \u2014 Cancel and reopen the task to see the latest version.'); }
       else { setModalStatus('failed', 'Not synced \u2014 check your connection and click Save note again. Nothing has been lost.'); }
     });
   }
@@ -4961,7 +5445,9 @@
     document.getElementById('nt-cancel').addEventListener('click', closeModal);
     if (editing){
       document.getElementById('nt-delete').addEventListener('click', function(){
-        openConfirmModal('Delete this task?', "This can't be undone.", 'Delete', function(){ deleteTask(taskId); });
+        var delTg = guardActive('tasks', taskId);
+        var delTv = delTg ? delTg.version : (state.tasks[taskId] ? state.tasks[taskId]._version : undefined);
+        openConfirmModal('Delete this task?', "This can't be undone.", 'Delete', function(){ deleteTask(taskId, delTv); });
       });
     }
     // Contact field: resolves only to an existing contact chosen from the
@@ -4994,6 +5480,10 @@
         document.getElementById('nt-use-deal-contact').addEventListener('click', function(){ ntContact.value = dealLabel; ntShowNote(''); });
       }
     });
+    // RC7: edit = remember the opened-with version + values (F1);
+    // new = one id and one createdAt for every retry of this form (F2).
+    if (editing) guardStart({ sheet:'tasks', id: taskId, version: editing._version, fields: [['nt-title'], ['nt-assigned'], ['nt-due'], ['nt-deal'], ['nt-contact'], ['nt-notes']], reopen: function(){ openTaskModal(taskId, presetDealId); } });
+    var newTaskId = editing ? null : uid(), newTaskCreatedAt = null;
     document.getElementById('new-task-form').addEventListener('submit', async function(e){
       e.preventDefault();
       var submitBtn = e.target.querySelector('button[type="submit"]');
@@ -5016,15 +5506,18 @@
         // handleSaveTask() stamps its own server time, so a client value
         // never matched on verification and every task edit read back as
         // "Not synced".
-        result = await saveTask(taskId, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, contactId:contactId, notes:notes }, { silent: true });
+        var tg = guardActive('tasks', taskId);
+        result = await saveTask(taskId, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, contactId:contactId, notes:notes }, { silent: true, baseVersion: tg ? tg.version : undefined });
       } else {
-        result = await saveTask(null, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, contactId:contactId, notes:notes, done:false, createdAt: nowIso() }, { silent: true });
+        result = await saveTask(newTaskId, { title:title, dueDate:dueDate, assignedTo:assignedTo, dealId:dealId||null, contactId:contactId, notes:notes, done:false, createdAt: (newTaskCreatedAt = newTaskCreatedAt || nowIso()) }, { silent: true, baseVersion: 0 });
       }
       if (submitBtn) submitBtn.disabled = false;
       if (result.status === 'saved'){
         closeModal();
       } else if (result.status === 'conflict'){
-        setModalStatus('conflict', 'Someone else updated this task while you were editing. Nothing you\u2019ve entered below has been lost \u2014 click Add task/Save changes again to apply it, or Cancel to review the latest version first.');
+        if (!(editing && guardHandleConflict(result, 'new-task-form')))
+          setModalStatus('conflict', editing ? 'Someone else updated this task while you were editing. Your changes were not saved \u2014 Cancel and reopen the task to see the latest version.'
+            : 'That didn\u2019t sync as expected. Nothing you\u2019ve entered has been lost \u2014 click Add task again (it will not be added twice).');
       } else {
         setModalStatus('failed', 'Not synced \u2014 check your connection and click Save again. Nothing you\u2019ve entered has been lost.');
       }
@@ -5059,6 +5552,8 @@
       // rather than assume it's already text.
       var phone = contact && contact.phone != null ? String(contact.phone) : '';
       var address = contact ? contact.address : '';
+      var serviceLoc = d.serviceAddress ? String(d.serviceAddress).trim() : '';   // RC7.2
+      var directionsTo = serviceLoc || address;
       var jt = JOB_TYPES.filter(function(j){ return j.id===d.jobType; })[0];
       var calLabel = CALIBRATION_TYPES.filter(function(c){ return c.id===d.calibrationType; })[0];
       var st = stageInfo(d.stage);
@@ -5071,12 +5566,13 @@
           '<div class="t-title">'+esc(d.title||'Untitled job')+' <span class="role-badge" style="background:'+st.bgDot+';color:#fff;">'+esc(st.label)+'</span></div>' +
           '<div class="t-meta">'+esc(contact?contact.name:(d.contactName||''))+(d.vehicle?' &middot; '+esc(d.vehicle):'')+(d.scheduledTime?' &middot; '+esc(d.scheduledTime):'')+'</div>' +
           (metaLine2.length ? '<div class="t-meta">'+esc(metaLine2.join(' \u00b7 '))+'</div>' : '') +
-          (address ? '<div class="t-meta">'+esc(address)+'</div>' : '') +
+          (serviceLoc ? '<div class="t-meta">Service location: '+esc(serviceLoc)+'</div>' : '') +
+          (address ? '<div class="t-meta">'+(serviceLoc ? 'Customer address: ' : '')+esc(address)+'</div>' : '') +
           (d.assignedTo ? '<div class="t-meta">Assigned: '+esc(d.assignedTo)+'</div>' : '') +
           (d.notes ? '<div class="t-meta" style="margin-top:6px;font-style:italic;">'+esc(d.notes)+'</div>' : '') +
           '<div class="tech-actions">' +
             (phone ? '<a class="btn btn-ghost btn-sm" href="tel:'+esc(phone.replace(/[^0-9+]/g,''))+'">Call</a>' : '') +
-            (address ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(address)+'" target="_blank" rel="noopener">Directions</a>' : '') +
+            (directionsTo ? '<a class="btn btn-ghost btn-sm" href="https://maps.google.com/?q='+encodeURIComponent(directionsTo)+'" target="_blank" rel="noopener">Directions</a>' : '') +
             '<button class="btn btn-primary btn-sm" data-open="'+esc(d.id)+'">Open job</button>' +
           '</div>' +
         '</div>'
@@ -5328,16 +5824,36 @@
       }
     });
   }
+  // RC7 (Tier 2): the server's reply is read (a refusal is reported with its
+  // reason), and success requires a fresh read showing EVERY submitted
+  // value — display name included — on that employee's row.
   async function saveUserRecord(email, patch){
     setSyncBadge('saving');
-    apiPostRaw(Object.assign({ action:'saveUser', email: email }, patch));
-    await sleep(900);
-    await loadUsersAndAudit();
-    var updated = (Array.isArray(state.users) ? state.users : []).find(function(u){ return String(u.email||'').trim().toLowerCase() === email.trim().toLowerCase(); });
-    var applied = updated && updated.role === patch.role && isActiveFlag(updated.active) === !!patch.active;
-    setSyncBadge(applied ? 'idle' : 'conflict');
+    var key = email.trim().toLowerCase();
+    var before = (Array.isArray(state.users) ? state.users : []).find(function(u){ return String(u.email||'').trim().toLowerCase() === key; });
+    // The server keeps the stored name when none is given (else the email).
+    var expectedName = patch.name || (before && before.name) || key;
+    var res = await apiPostWithResponse(Object.assign({ action:'saveUser', email: email }, patch));
+    // RC7.1: a known refusal means nothing was written; any other error
+    // (e.g. a server error after the write) is settled by the fresh reads below.
+    if (res && res.ok === false && res.error && { last_admin:1, invalid_email:1, invalid_role:1, invalid_request:1, forbidden:1, lock_timeout:1, expired:1, deactivated:1, not_authorized:1, bad_signature:1, bad_token:1, no_token:1, bad_payload:1 }[res.error]){
+      if (handleAuthError(res.error)){ setSyncBadge('failed'); return { status:'failed', error: res.error }; }
+      await loadUsersAndAudit(); renderUsers();
+      setSyncBadge('failed');
+      return { status:'failed', error: res.error };
+    }
+    var updated = null;
+    for (var attempt = 0; attempt < 3; attempt++){
+      await sleep(attempt === 0 ? 300 : 900);
+      await loadUsersAndAudit();
+      updated = (Array.isArray(state.users) ? state.users : []).find(function(u){ return String(u.email||'').trim().toLowerCase() === key; });
+      if (updated && updated.role === patch.role && isActiveFlag(updated.active) === !!patch.active && String(updated.name||'') === String(expectedName)) break;
+      updated = null;
+    }
+    var applied = !!updated;
+    setSyncBadge(applied ? 'idle' : 'failed');
     renderUsers();
-    return { status: applied ? 'saved' : 'failed' };
+    return { status: applied ? 'saved' : 'failed', error: applied ? null : 'not_verified' };
   }
   function openUserModal(existingUser){
     var editing = !!existingUser;
@@ -5371,7 +5887,10 @@
       if (result.status === 'saved'){
         closeModal();
       } else {
-        setModalStatus('failed', 'That change wasn\u2019t applied \u2014 this can happen if it would leave the CRM with no active Administrator, or if the email/role was invalid. Nothing you\u2019ve entered has been lost; adjust and try again.');
+        var userErr = { last_admin: 'That change wasn\u2019t applied: it would leave the CRM with no active Administrator.', invalid_email: 'That change wasn\u2019t applied: the email address isn\u2019t valid.',
+          invalid_role: 'That change wasn\u2019t applied: choose Technician, Manager or Admin.', forbidden: 'That change wasn\u2019t applied: only an Admin can change users.',
+          lock_timeout: 'That change wasn\u2019t applied: the CRM was busy with other saves. Please try again.' }[result.error];
+        setModalStatus('failed', userErr || 'That change couldn\u2019t be confirmed \u2014 this can happen if it would leave the CRM with no active Administrator, if the email/role was invalid, or if the connection dropped. Nothing you\u2019ve entered has been lost; check the list and try again.');
       }
     });
   }
@@ -5380,7 +5899,7 @@
   // ---------- modals ----------
   var backdrop = document.getElementById('modal-backdrop');
   var modalBox = document.getElementById('modal-box');
-  function closeModal(){ backdrop.hidden = true; modalBox.innerHTML = ''; }
+  function closeModal(){ backdrop.hidden = true; modalBox.innerHTML = ''; formGuard = null; }
   // Shows/updates a status line at the top of whatever form is currently
   // open, without touching any of the form's own fields — this is what lets
   // a failed or conflicting save tell the user what happened while leaving
@@ -6052,14 +6571,21 @@
           // the Deal. Gracefully shows only whatever fields the Contact
           // actually has, and nothing at all if the Contact can't be
           // resolved, rather than erroring.
-          (contact && (contact.phone || contact.email || contact.address) ?
+          (contact ?
             '<div class="section-label" style="margin-top:2px;">Customer contact information</div>' +
             '<div class="form-field full" style="margin-top:-6px;">' +
               (contact.phone ? '<div style="margin-bottom:6px;"><div style="font-size:11.5px;color:var(--color-text-muted);">Phone</div><a href="tel:'+esc(String(contact.phone).replace(/[^0-9+]/g,''))+'" style="font-size:13.5px;">'+esc(contact.phone)+'</a></div>' : '') +
               (contact.email ? '<div style="margin-bottom:6px;"><div style="font-size:11.5px;color:var(--color-text-muted);">Email</div><a href="mailto:'+esc(contact.email)+'" style="font-size:13.5px;">'+esc(contact.email)+'</a></div>' : '') +
-              (contact.address ? '<div><div style="font-size:11.5px;color:var(--color-text-muted);">Address</div><a href="https://maps.google.com/?q='+encodeURIComponent(contact.address)+'" target="_blank" rel="noopener" style="font-size:13.5px;">'+esc(contact.address)+'</a></div>' : '') +
+              // RC7.2: the customer's primary address lives ONLY on the Contact;
+              // it is edited here through the Contact's own versioned save.
+              '<div class="addr-block" id="dm-cust-addr-block"><div class="addr-label">Customer address</div><div id="dm-cust-addr-view" style="font-size:13.5px;"></div>' +
+                '<button type="button" class="btn btn-ghost btn-sm" id="dm-cust-addr-edit" style="margin-top:4px;">Edit customer address</button>' +
+                '<div id="dm-cust-addr-editor" hidden style="margin-top:6px;"><input id="dm-cust-addr-input" placeholder="e.g. 123 Main St, Katy, TX 77494" aria-label="Customer address">' +
+                  '<div class="fh-log-row" style="margin-top:6px;"><button type="button" class="btn btn-primary btn-sm" id="dm-cust-addr-save">Save address</button><button type="button" class="btn btn-ghost btn-sm" id="dm-cust-addr-cancel">Cancel</button></div>' +
+                  '<div id="dm-cust-addr-conflict" hidden></div></div>' +
+                '<div class="addr-status" id="dm-cust-addr-status" role="status" aria-live="polite"></div></div>' +
             '</div>'
-          : '')
+          : '<div class="form-field full"><div class="addr-hint">No linked contact — a customer address can’t be edited from this opportunity.</div></div>')
           :
           '<div class="form-grid">' +
             '<div class="form-field full"><label for="dm-contact-name">Contact name</label><input list="contact-names" id="dm-contact-name" required></div>' +
@@ -6073,7 +6599,7 @@
             // which keeps working exactly as before with just name/phone/
             // email defaulting company/address/accountType blank/individual.
             '<div class="form-field" id="dm-existing-contact-fields" hidden><label for="dm-company">Company</label><input id="dm-company"></div>' +
-            '<div class="form-field full" id="dm-address-field" hidden><label for="dm-address">Address</label><input id="dm-address"></div>' +
+            '<div class="form-field full" id="dm-address-field"><label for="dm-address">Customer address (optional)</label><input id="dm-address" placeholder="e.g. 123 Main St, Katy, TX 77494"></div>' +
             '<div class="form-field" id="dm-accounttype-field" hidden><label for="dm-accounttype">Account type</label><select id="dm-accounttype"><option value="individual">Individual</option><option value="fleet">Fleet / commercial account</option></select></div>' +
           '</div>'
         ) +
@@ -6081,6 +6607,9 @@
           '<div class="form-field full"><label for="dm-title">Job description</label><input id="dm-title" placeholder="e.g. Windshield replacement" value="'+esc(editing ? editing.title : '')+'" required></div>' +
           '<div class="form-field"><label for="dm-vehicle">Vehicle (year / make / model)</label><input id="dm-vehicle" placeholder="e.g. 2021 Toyota Camry" value="'+esc(editing ? editing.vehicle : '')+'"></div>' +
           '<div class="form-field"><label for="dm-plate">License plate</label><input id="dm-plate" placeholder="e.g. ABC-1234" value="'+esc(editing ? editing.licensePlate : '')+'"></div>' +
+          // RC7.2: where THIS job is done. Optional; blank = same as the
+          // customer address (nothing is copied or written automatically).
+          '<div class="form-field full"><label for="dm-service-address">Service location (where this job is done)</label><input id="dm-service-address" placeholder="Not set" value="'+esc(editing ? (editing.serviceAddress || '') : '')+'"><div class="addr-hint" id="dm-service-hint">'+(!editing ? 'Defaults to the customer address — change it only if this job is done somewhere else. Changing it never changes the customer address.' : (editing.serviceAddress ? '' : 'No service location saved for this job — Directions use the customer address.'))+'</div></div>' +
           '<div class="form-field"><label for="dm-amount">Quote amount ($)</label><input id="dm-amount" type="number" min="0" step="0.01" value="'+(editing && editing.quoteAmount ? editing.quoteAmount : '')+'"></div>' +
           '<div class="form-field"><label for="dm-jobtype">Job type</label><select id="dm-jobtype">'+JOB_TYPES.map(function(j){ return '<option value="'+j.id+'"'+(editing && editing.jobType===j.id ? ' selected':'')+'>'+esc(j.label)+'</option>'; }).join('')+'</select></div>' +
           '<div class="form-field"><label for="dm-caltype">Calibration type</label><select id="dm-caltype">'+CALIBRATION_TYPES.map(function(c){ return '<option value="'+c.id+'"'+(editing && editing.calibrationType===c.id ? ' selected':'')+'>'+esc(c.label)+'</option>'; }).join('')+'</select></div>' +
@@ -6132,7 +6661,7 @@
             return '<div style="font-size:12.5px;padding:4px 0;">&bull; '+esc(t.title)+(t.assignedTo?' <span style="color:var(--color-text-muted);">('+esc(t.assignedTo)+')</span>':'')+'</div>';
           }).join('') +
           '<button type="button" class="btn btn-ghost btn-sm" id="dm-add-task" style="margin-top:6px;">+ Add task for this job</button></div>' : '') +
-        (editing ? '<div class="review-btn-row"><label style="display:block;font-size:12px;font-weight:600;color:var(--color-text-muted);margin-bottom:6px;">Follow-up activity</label><button type="button" class="btn btn-ghost btn-sm" id="dm-log-followup">+ Log follow-up</button></div>' : '') +
+        (editing ? followupSectionHtml('dm', { dealId: dealId }) : '') +
         '<div class="modal-actions">' +
           (editing ? '<button type="button" class="btn btn-danger btn-sm" id="dm-delete">Delete</button>' : '<span></span>') +
           '<div class="right"><button type="button" class="btn btn-ghost" id="dm-cancel">Cancel</button><button type="submit" class="btn btn-primary">'+(editing ? 'Save changes' : 'Add opportunity')+'</button></div>' +
@@ -6189,8 +6718,14 @@
     }
     // Stage note: Customer Follow-up block message, or the Payment Received
     // balance (shown, never blocking).
+    // RC7.1b: the Customer Follow-up refusal stays visible until the employee
+    // changes the stage or the billing fields; a background refresh or a
+    // payment re-checks it with the same gate (formFollowupGate) instead of
+    // clearing it.
+    var stageBlockShown = false;
     function renderStageNote(blockMsg){
       var n = document.getElementById('dm-stage-note'); if (!n) return;
+      stageBlockShown = !!blockMsg;
       if (blockMsg){ n.hidden = false; n.className = 'stage-note block'; n.textContent = blockMsg; return; }
       n.className = 'stage-note';
       if (editing && stSel.value === 'payment_received'){
@@ -6203,6 +6738,13 @@
         return;
       }
       n.hidden = true; n.textContent = '';
+    }
+    function refreshStageNote(){
+      if (stageBlockShown && stSel.value !== 'customer_followup'){
+        var g = formFollowupGate();
+        if (!g.ok){ renderStageNote(g.message); return; }
+      }
+      renderStageNote();
     }
     // The Customer Follow-up gate for what this form would save (FD2: hard
     // gate, no override). Includes the Final Invoice autofill a move into a
@@ -6260,9 +6802,9 @@
         // never re-applies the old stage.
         onDealChanged: function(prev, next){
           if (!next) return;
-          if (prev && next.stage !== prev.stage && stSel.value === prev.stage){ stSel.value = next.stage; stagePrev = next.stage; }
+          if (prev && next.stage !== prev.stage && stSel.value === prev.stage){ stSel.value = next.stage; stagePrev = next.stage; guardSetBase('dm-stage', next.stage); }
           editing = next;
-          renderStageNote();
+          refreshStageNote();
         },
         // A background refresh (another user, or a queued move) can change
         // the saved stage while this form is open: follow it, so Save changes
@@ -6273,10 +6815,21 @@
             if (stSel.value === editing.stage){ stSel.value = cur.stage; stagePrev = cur.stage; }
             editing = cur;
           }
-          renderStageNote();
+          refreshStageNote();
         }
       });
     }
+    // RC7 (F1): remember the version and field values this form opened with.
+    var DEAL_GUARD_FIELDS = [['dm-title'], ['dm-vehicle'], ['dm-plate'], ['dm-amount'], ['dm-jobtype'], ['dm-caltype'], ['dm-stage'], ['dm-source'], ['dm-assigned'],
+      ['dm-scheduled'], ['dm-scheduledtime'], ['dm-parts'], ['dm-lostreason'], ['dm-ins-carrier'], ['dm-ins-claim'], ['dm-ins-adjuster'], ['dm-ins-adjphone'], ['dm-ins-auth'],
+      ['dm-finalinvoice'], ['dm-attachments'], ['dm-notes'], ['dm-service-address']];
+    if (editing) guardStart({ sheet:'deals', id: dealId, version: editing._version, fields: DEAL_GUARD_FIELDS, reopen: function(){ openDealModal(dealId); } });
+    else formGuard = null;
+    // RC7 (F2): a new opportunity keeps ONE id and ONE creation time for
+    // every retry of this form, so a retry after "Not synced" never creates
+    // a second copy. The contact created from this form already works this way.
+    var pendingNewDealId = editing ? null : uid();
+    var pendingNewDealStamp = null, pendingNewContactStamp = null;
     document.getElementById('dm-cancel').addEventListener('click', closeModal);
     // Duplicate-prevention state for the NEW-opportunity path only.
     // pinnedContactId: a specific Contact the user picked from the
@@ -6315,7 +6868,9 @@
     }
     if (editing){
       document.getElementById('dm-delete').addEventListener('click', function(){
-        openConfirmModal('Delete this opportunity?', "This can't be undone.", 'Delete', function(){ deleteDeal(dealId); });
+        var delG = guardActive('deals', dealId);
+        var delVersion = delG ? delG.version : (state.deals[dealId] ? state.deals[dealId]._version : undefined);
+        openConfirmModal('Delete this opportunity?', "This can't be undone.", 'Delete', function(){ deleteDeal(dealId, delVersion); });
       });
       var reviewBtn = document.getElementById('dm-mark-review');
       if (reviewBtn){ reviewBtn.addEventListener('click', function(){ updateDeal(dealId, { reviewRequested:true, reviewRequestedAt: nowIso() }); closeModal(); }); }
@@ -6323,8 +6878,10 @@
       if (archiveBtn){ archiveBtn.addEventListener('click', function(){ updateDeal(dealId, { archived: !editing.archived }); closeModal(); }); }
       var addTaskBtn = document.getElementById('dm-add-task');
       if (addTaskBtn){ addTaskBtn.addEventListener('click', function(){ openTaskModal(null, dealId); }); }
-      var logFollowupBtn = document.getElementById('dm-log-followup');
-      if (logFollowupBtn){ logFollowupBtn.addEventListener('click', function(){ openLogFollowupModal(editing.contactId||null, dealId); }); }
+      mountFollowupLogger('dm', editing.contactId || null, dealId);   // RC7.2: inline, keeps unsaved card edits
+      mountCustomerAddressEditor(editing.contactId || null);
+      var svcIn = document.getElementById('dm-service-address'), svcHint = document.getElementById('dm-service-hint');
+      if (svcIn && svcHint) svcIn.addEventListener('input', function(){ svcHint.textContent = svcIn.value.trim() ? '' : 'No service location saved for this job \u2014 Directions use the customer address.'; });
       var addAttachmentBtn = document.getElementById('dm-add-attachment');
       var attachFileInput = document.getElementById('dm-attach-file');
       if (addAttachmentBtn && attachFileInput){
@@ -6346,6 +6903,34 @@
       // typed name stops matching, the extra fields hide again and Phone/
       // Email revert to being plain new-contact fields exactly as before.
       var nameInput = document.getElementById('dm-contact-name');
+      // RC7 (F1): the matched Contact's details are an edit of that Contact:
+      // remember the version and values they were shown with, so a change
+      // another employee saves to that Contact meanwhile is never overwritten.
+      var CONTACT_SYNC_FIELDS = [['dm-contact-name'], ['dm-phone'], ['dm-email'], ['dm-company'], ['dm-address'], ['dm-accounttype']];
+      // RC7.2: the new opportunity's Service location defaults to the Customer
+      // address (shown above for an existing contact, typed for a new one) and
+      // keeps following it until the employee types a Service location of their
+      // own. It is saved on the opportunity only; it never changes the contact.
+      var svcField = document.getElementById('dm-service-address'), custAddrField = document.getElementById('dm-address');
+      var svcFollows = true;
+      var followServiceFromAddress = function(){ if (svcFollows && svcField && custAddrField) svcField.value = custAddrField.value.trim(); };
+      if (svcField) svcField.addEventListener('input', function(){ svcFollows = svcField.value.trim() === ''; if (svcFollows) followServiceFromAddress(); });
+      if (custAddrField) custAddrField.addEventListener('input', followServiceFromAddress);
+      function fillMatchedContact(match){
+        document.getElementById('dm-phone').value = match.phone || '';
+        document.getElementById('dm-email').value = match.email || '';
+        document.getElementById('dm-company').value = match.company || '';
+        document.getElementById('dm-address').value = match.address || '';
+        document.getElementById('dm-address').setAttribute('data-filled-from', match.address || '');
+        followServiceFromAddress();
+        document.getElementById('dm-accounttype').value = match.accountType === 'fleet' ? 'fleet' : 'individual';
+        guardStart({ sheet:'contacts', id: match.id, version: match._version, fields: CONTACT_SYNC_FIELDS, reopen: function(){
+          var latest = state.contacts[match.id];
+          if (!latest) { formGuard = null; return; }
+          document.getElementById('dm-contact-name').value = latest.name || '';
+          fillMatchedContact(latest);
+        } });
+      }
       var matchNote = document.getElementById('dm-contact-match-note');
       var extraFields = document.getElementById('dm-existing-contact-fields');
       var addressField = document.getElementById('dm-address-field');
@@ -6353,20 +6938,23 @@
       nameInput.addEventListener('input', function(){
         var match = resolveSelectedContact(nameInput.value);
         if (match){
-          document.getElementById('dm-phone').value = match.phone || '';
-          document.getElementById('dm-email').value = match.email || '';
-          document.getElementById('dm-company').value = match.company || '';
-          document.getElementById('dm-address').value = match.address || '';
-          document.getElementById('dm-accounttype').value = match.accountType === 'fleet' ? 'fleet' : 'individual';
+          fillMatchedContact(match);
           matchNote.hidden = false;
           matchNote.textContent = 'Matches an existing contact — their saved information is shown below. Editing it here will update their contact record.';
           extraFields.hidden = false;
           addressField.hidden = false;
           accountTypeField.hidden = false;
         } else {
+          formGuard = null;
           matchNote.hidden = true;
           extraFields.hidden = true;
-          addressField.hidden = true;
+          // RC7.2: the address field stays visible for a new customer; an
+          // address that was only filled in from a previously matched
+          // contact is cleared so it can't be copied to someone else.
+          var addrIn = document.getElementById('dm-address');
+          if (addrIn && addrIn.getAttribute('data-filled-from') && addrIn.value === addrIn.getAttribute('data-filled-from')) addrIn.value = '';
+          if (addrIn) addrIn.removeAttribute('data-filled-from');
+          followServiceFromAddress();
           accountTypeField.hidden = true;
         }
       });
@@ -6404,8 +6992,12 @@
       if (editing && state.deals[dealId]) editing = state.deals[dealId];   // latest saved copy (payments may have changed it)
       var attachmentLinks = document.getElementById('dm-attachments').value.trim();
       var notes = document.getElementById('dm-notes').value.trim();
+      var serviceAddressEl = document.getElementById('dm-service-address');
+      var serviceAddress = serviceAddressEl ? serviceAddressEl.value.trim() : '';
 
       var common = { title:title, vehicle:vehicle, licensePlate:licensePlate, quoteAmount: amount ? Number(amount) : null, jobType:jobType, calibrationType:calibrationType, stage:stage, source:source, assignedTo:assignedTo, scheduledDate:scheduledDate, scheduledTime:scheduledTime, partsStatus:partsStatus, lostReason:lostReason, insuranceCarrier:insuranceCarrier, claimNumber:claimNumber, adjusterName:adjusterName, adjusterPhone:adjusterPhone, insuranceAuthorized:insuranceAuthorized, finalInvoice: finalInvoiceRaw === '' ? null : Number(finalInvoiceRaw), attachmentLinks:attachmentLinks, notes:notes, updatedAt: nowIso() };
+      // RC7.2: Service location is sent only when it is set or changed.
+      if (serviceAddress !== String(editing ? (editing.serviceAddress || '') : '')) common.serviceAddress = serviceAddress;
 
       // Z0: a newly typed $0 Final Invoice must be confirmed as no charge.
       var invFields = formInvoiceFields();
@@ -6494,7 +7086,15 @@
           (invoiceChangedHere && !sumBefore.obligationMet);
         setSubmitBusy(submitBtn, true);
         setModalStatus(null, null);
-        var result = await updateDeal(dealId, common, { silent: true, invoiceOverpaymentConfirmed: invoiceOverAck });
+        // RC7 (F1): never stack this form's save behind another unconfirmed
+        // write to the same job; send the version the form was opened with.
+        if (!(await waitDealIdle(dealId))){
+          setSubmitBusy(submitBtn, false);
+          setModalStatus('failed', 'An earlier change to this job hasn\u2019t been confirmed yet. Wait a moment and click Save changes again. Nothing you\u2019ve entered has been lost.');
+          return;
+        }
+        var dg = guardActive('deals', dealId);
+        var result = await updateDeal(dealId, common, { silent: true, invoiceOverpaymentConfirmed: invoiceOverAck, baseVersion: dg ? dg.version : undefined });
         setSubmitBusy(submitBtn, false);
         if (result.status === 'saved' || result.status === 'queued'){
           closeModal();
@@ -6508,7 +7108,8 @@
           if (result.error === 'followup_not_allowed'){ stSel.value = state.deals[dealId] ? state.deals[dealId].stage : stSel.value; stagePrev = stSel.value; renderStageNote(result.detail.message); }
           setModalStatus('failed', result.detail.message);
         } else if (result.status === 'conflict'){
-          setModalStatus('conflict', 'Someone else updated this job while you were editing. Nothing you\u2019ve entered below has been lost \u2014 click Save changes again to apply it on top of their update, or Cancel to review the latest version first.');
+          if (!guardHandleConflict(result, 'deal-form'))
+            setModalStatus('conflict', 'Someone else updated this job while you were editing. Your changes were not saved \u2014 Cancel and reopen the job to see the latest version.');
         } else {
           setModalStatus('failed', 'Not synced \u2014 check your connection and click Save changes again. Nothing you\u2019ve entered has been lost.');
         }
@@ -6523,9 +7124,10 @@
         clearDuplicatePanel();
         var existing = resolveSelectedContact(contactName);
         var proceedWithContactId = async function(contactId){
-          var data = Object.assign({ contactId: contactId, contactName: contactName, createdAt: nowIso(),
-            quoteSentAt: stage==='quote_sent' ? nowIso() : null,
-            closedAt: (isRealized(stage)||stage==='closed_lost') ? nowIso() : null }, common);
+          pendingNewDealStamp = pendingNewDealStamp || nowIso();
+          var data = Object.assign({ contactId: contactId, contactName: contactName, createdAt: pendingNewDealStamp,
+            quoteSentAt: stage==='quote_sent' ? pendingNewDealStamp : null,
+            closedAt: (isRealized(stage)||stage==='closed_lost') ? pendingNewDealStamp : null }, common);
           // A new opportunity has no payments yet: C1 falls back to today.
           if (isRealized(stage)) data.paymentReceivedDate = localDateKey();
           // Milestone stamps for an opportunity CREATED directly in a later
@@ -6539,12 +7141,12 @@
           if (stage === 'job_completed') data.jobCompletedAt = data.createdAt;
           setSubmitBusy(submitBtn, true);
           setModalStatus(null, null);
-          var result = await saveDeal(null, data, { silent: true });
+          var result = await saveDeal(pendingNewDealId, data, { silent: true, baseVersion: 0 });
           setSubmitBusy(submitBtn, false);
           if (result.status === 'saved'){
             closeModal();
           } else if (result.status === 'conflict'){
-            setModalStatus('conflict', 'That didn\u2019t sync as expected. Nothing you\u2019ve entered below has been lost \u2014 click Add opportunity again to retry.');
+            setModalStatus('conflict', 'That didn\u2019t sync as expected. Nothing you\u2019ve entered below has been lost \u2014 click Add opportunity again to retry (it will not be added twice).');
           } else {
             setModalStatus('failed', 'Not synced \u2014 check your connection and click Add opportunity again. Nothing you\u2019ve entered has been lost.');
           }
@@ -6568,8 +7170,15 @@
             accountType: accountTypeField2 ? accountTypeField2.value : 'individual'
           };
           var contactPatch = {};
+          // RC7 (F1): compare with the values this form SHOWED for the
+          // Contact (not a copy refreshed in the background), so only fields
+          // the employee actually edited are sent.
+          var cg = guardActive('contacts', existing.id);
+          var FIELD_INPUT = { name:'dm-contact-name', phone:'dm-phone', email:'dm-email', company:'dm-company', address:'dm-address', accountType:'dm-accounttype' };
           Object.keys(newVals).forEach(function(field){
-            if (newVals[field] !== (existing[field] || '')) contactPatch[field] = newVals[field];
+            var shown = cg ? String(cg.base[FIELD_INPUT[field]] == null ? '' : cg.base[FIELD_INPUT[field]]).trim() : (existing[field] || '');
+            if (field === 'accountType' && cg) shown = cg.base['dm-accounttype'] || 'individual';
+            if (newVals[field] !== shown) contactPatch[field] = newVals[field];
           });
           if (unconfirmedContactFields && unconfirmedContactFields.contactId === existing.id){
             Object.keys(unconfirmedContactFields.fields).forEach(function(field){ contactPatch[field] = newVals[field]; });
@@ -6594,13 +7203,14 @@
           // 'saved' proceeds; 'conflict'/'failed' keep the modal open.
           setSubmitBusy(submitBtn, true);
           setModalStatus(null, null);
-          var contactResult = await saveContact(existing.id, contactPatch, { silent: true });
+          var contactResult = await saveContact(existing.id, contactPatch, { silent: true, baseVersion: cg ? cg.version : undefined });
           setSubmitBusy(submitBtn, false);
           if (contactResult.status === 'saved'){
             unconfirmedContactFields = null;
             proceedWithContactId(existing.id);
           } else if (contactResult.status === 'conflict'){
             unconfirmedContactFields = null; // conflict path re-reads the server version, so the next diff is accurate
+            if (guardActive('contacts', existing.id) && guardHandleConflict(contactResult, 'deal-form')) return;
             setModalStatus('conflict', 'Someone else updated this contact while you were working, so your contact changes weren’t applied and the opportunity hasn’t been saved yet. Nothing you’ve entered below has been lost — click Add opportunity again to apply it on top of their update, or Cancel to review the latest version first.');
           } else {
             var failedFields = (unconfirmedContactFields && unconfirmedContactFields.contactId === existing.id) ? unconfirmedContactFields.fields : {};
@@ -6636,7 +7246,8 @@
               onCreateNew: function(){ dealNameReviewedFor = normalizeContactName(contactName); clearDuplicatePanel(); resubmitDeal(); } });
             return;
           }
-          var newContact = { name: contactName, phone: phone, email: email, company:'', accountType:'individual', address:'', whereMet:'', affiliations:'', notes:'', createdAt: nowIso() };
+          pendingNewContactStamp = pendingNewContactStamp || nowIso();
+          var newContact = { name: contactName, phone: phone, email: email, company:'', accountType:'individual', address: addressField2 ? addressField2.value.trim() : '', whereMet:'', affiliations:'', notes:'', createdAt: pendingNewContactStamp };
           var newId = pendingNewContactId;
           // The Contact must be confirmed BEFORE the Opportunity is saved:
           // the backend can now refuse a duplicate create, and an
@@ -6644,7 +7255,7 @@
           // never created.
           setSubmitBusy(submitBtn, true);
           setModalStatus(null, null);
-          var newContactResult = await saveContact(newId, newContact, dealOverrideOption ? { silent: true, contactDuplicateOverride: dealOverrideOption } : { silent: true });
+          var newContactResult = await saveContact(newId, newContact, dealOverrideOption ? { silent: true, baseVersion: 0, contactDuplicateOverride: dealOverrideOption } : { silent: true, baseVersion: 0 });
           setSubmitBusy(submitBtn, false);
           if (newContactResult.status === 'saved'){
             proceedWithContactId(newId);
@@ -6679,12 +7290,12 @@
           '<div class="form-field"><label for="cm-phone">Phone</label><input id="cm-phone" type="tel" value="'+esc(editing ? editing.phone : '')+'"></div>' +
           '<div class="form-field"><label for="cm-email">Email</label><input id="cm-email" type="email" value="'+esc(editing ? editing.email : '')+'"></div>' +
           '<div class="form-field"><label for="cm-where">Where you met</label><input id="cm-where" value="'+esc(editing ? editing.whereMet : '')+'"></div>' +
-          '<div class="form-field full"><label for="cm-address">Full address (street, city, state, zip)</label><input id="cm-address" placeholder="e.g. 123 Main St, Katy, TX 77494" value="'+esc(editing ? editing.address : '')+'"></div>' +
+          '<div class="form-field full"><label for="cm-address">Customer address (street, city, state, zip)</label><input id="cm-address" placeholder="e.g. 123 Main St, Katy, TX 77494" value="'+esc(editing ? editing.address : '')+'"></div>' +
           '<div class="form-field full"><label for="cm-affil">Shared professional affiliations</label><input id="cm-affil" placeholder="e.g. Rotary Club, dealership network" value="'+esc(editing ? editing.affiliations : '')+'"></div>' +
           '<div class="form-field full"><label for="cm-notes">Notes</label><textarea id="cm-notes">'+esc(editing ? editing.notes : '')+'</textarea></div>' +
         '</div>' +
         (relatedDeals.length ? '<div class="section-label" style="margin-top:6px;">Vehicle &amp; job history</div><div class="deal-list-mini">'+relatedDeals.map(function(d){ return '<div class="dlm-row"><span>'+esc(d.title||'Untitled')+(d.vehicle?' &middot; '+esc(d.vehicle):'')+'</span><span>'+esc(stageInfo(d.stage).label)+'</span></div>'; }).join('')+'</div>' : '') +
-        (editing ? '<div class="review-btn-row"><label style="display:block;font-size:12px;font-weight:600;color:var(--color-text-muted);margin-bottom:6px;">Follow-up activity</label><button type="button" class="btn btn-ghost btn-sm" id="cm-log-followup">+ Log follow-up</button></div>' : '') +
+        (editing ? followupSectionHtml('cm', { contactId: contactId }) : '') +
         '<div class="modal-actions">' +
           (editing ? '<button type="button" class="btn btn-danger btn-sm" id="cm-delete">Delete</button>' : '<span></span>') +
           '<div class="right"><button type="button" class="btn btn-ghost" id="cm-cancel">Cancel</button><button type="submit" class="btn btn-primary">'+(editing ? 'Save changes' : 'Add contact')+'</button></div>' +
@@ -6696,6 +7307,8 @@
     document.getElementById('cm-cancel').addEventListener('click', closeModal);
     if (editing){
       document.getElementById('cm-delete').addEventListener('click', function(){
+        var delCg = guardActive('contacts', contactId);
+        var delVersion = delCg ? delCg.version : (state.contacts[contactId] ? state.contacts[contactId]._version : undefined);   // RC7: the version the employee was looking at
         openConfirmModal('Delete this contact?', 'This contact can only be deleted if it has no linked opportunities or follow-ups.', 'Delete', async function(){
           // Keep the contact on screen while the server decides; it is only
           // removed once the delete is confirmed.
@@ -6704,9 +7317,10 @@
           var form = document.getElementById('contact-form');
           var delBtn = document.getElementById('cm-delete');
           if (delBtn){ delBtn.disabled = true; delBtn.textContent = 'Deleting…'; }
-          var res = await deleteContact(contactId);
+          var res = await deleteContact(contactId, delVersion);
           var stillOpen = form && form.isConnected;
           var msg = res.status === 'blocked' ? contactLinkedMessage(res.links)
+            : res.message ? res.message
             : 'Delete not confirmed — the contact was not removed. Please try again.';
           if (res.status === 'deleted'){
             if (stillOpen) closeModal();
@@ -6718,13 +7332,18 @@
           }
         });
       });
-      var logFollowupBtn = document.getElementById('cm-log-followup');
-      if (logFollowupBtn){ logFollowupBtn.addEventListener('click', function(){ openLogFollowupModal(contactId, null); }); }
+      mountFollowupLogger('cm', contactId, null);   // RC7.2: inline, keeps unsaved card edits
     }
     // A new Contact keeps ONE id for the life of this modal, so a retry
     // after a "Not synced" result (where the first create may actually have
     // landed) updates that same record instead of creating a second one.
     var createId = editing ? contactId : uid();
+    var createStamp = null;   // RC7 (F2): one creation time for every retry of a new Contact
+    // RC7 (F1): an edit remembers the version and values it opened with.
+    if (editing) guardStart({ sheet:'contacts', id: contactId, version: editing._version,
+      fields: [['cm-name'], ['cm-accounttype'], ['cm-company'], ['cm-phone'], ['cm-email'], ['cm-where'], ['cm-address'], ['cm-affil'], ['cm-notes']],
+      reopen: function(){ openContactModal(contactId); } });
+    else formGuard = null;
     // Normalized name the user explicitly chose "Create new contact" for
     // after reviewing a same-name match (Rule C). Reset if the name changes.
     var nameReviewedFor = null;
@@ -6744,13 +7363,30 @@
         address: document.getElementById('cm-address').value.trim(),
         affiliations: document.getElementById('cm-affil').value.trim(),
         notes: document.getElementById('cm-notes').value.trim(),
-        createdAt: editing ? editing.createdAt : nowIso()
+        createdAt: editing ? editing.createdAt : (createStamp = createStamp || nowIso())
         // updatedAt intentionally NOT sent: handleSaveContact() always
         // stamps its own server time, so a client value can never match on
         // verification and made every save here read back as "Not synced"
         // (and a retry then created a second Contact).
       };
       if (!data.name) return;
+      // RC7.2: a Technician may change only the customer address (the backend
+      // enforces the same rule). Only the address is sent; any other edited
+      // field is refused here, before anything is written.
+      if (editing && state.currentUser && state.currentUser.role === 'Technician'){
+        var tg = guardActive('contacts', contactId);
+        var TECH_FIELD_INPUT = { name:'cm-name', accountType:'cm-accounttype', company:'cm-company', phone:'cm-phone', email:'cm-email', whereMet:'cm-where', address:'cm-address', affiliations:'cm-affil', notes:'cm-notes' };
+        var techChanged = Object.keys(TECH_FIELD_INPUT).filter(function(k){
+          var shown = tg ? String(tg.base[TECH_FIELD_INPUT[k]] == null ? '' : tg.base[TECH_FIELD_INPUT[k]]).trim() : String(editing[k] == null ? '' : editing[k]).trim();
+          return String(data[k] == null ? '' : data[k]).trim() !== shown;
+        });
+        if (techChanged.some(function(k){ return k !== 'address'; })){
+          setModalStatus('failed', 'Technicians can change only the customer address. Undo the other changes (or ask a Manager), then click Save changes. Nothing has been saved.');
+          return;
+        }
+        if (!techChanged.length){ closeModal(); return; }
+        data = { address: data.address };
+      }
       clearDuplicatePanel();
       var openExisting = function(c){ openContactModal(c.id); };
       var resubmitContact = function(){ contactForm.requestSubmit ? contactForm.requestSubmit() : contactForm.dispatchEvent(new Event('submit', { cancelable:true })); };
@@ -6782,12 +7418,16 @@
       }
       setSubmitBusy(submitBtn, true);
       setModalStatus(null, null);
-      var result = await saveContact(createId, data, overrideOption ? { silent: true, contactDuplicateOverride: overrideOption } : { silent: true });
+      var cmg = editing ? guardActive('contacts', contactId) : null;
+      var cmBase = editing ? (cmg ? cmg.version : undefined) : 0;
+      var result = await saveContact(createId, data, overrideOption ? { silent: true, baseVersion: cmBase, contactDuplicateOverride: overrideOption } : { silent: true, baseVersion: cmBase });
       setSubmitBusy(submitBtn, false);
       if (result.status === 'saved'){
         closeModal();
       } else if (result.status === 'conflict'){
-        setModalStatus('conflict', 'Someone else updated this contact while you were editing. Nothing you\u2019ve entered below has been lost \u2014 click Save again to apply it on top of their update, or Cancel to review the latest version first.');
+        if (!(editing && guardHandleConflict(result, 'contact-form')))
+          setModalStatus('conflict', editing ? 'Someone else updated this contact while you were editing. Your changes were not saved \u2014 Cancel and reopen the contact to see the latest version.'
+            : 'That didn\u2019t sync as expected. Nothing you\u2019ve entered below has been lost \u2014 click Save again (the contact will not be added twice).');
       } else {
         // The backend rejects a duplicate inside its write lock, which the
         // browser sees as "not confirmed". The failed verification has just
@@ -6935,7 +7575,7 @@
         }
         state.remoteConnected = true;
         applyRemoteSnapshot(data);
-        setSyncBadge('idle');
+        refreshSetsBadge('idle');
         // Resume any deal writes parked by dispatchQueuedDealWrite after an
         // earlier ambiguous failure — this read just gave state.deals a
         // genuinely fresh, authoritative _version, so it's now safe to
@@ -6951,7 +7591,7 @@
         });
       }).catch(function(){
         state.remoteConnected = false;
-        setSyncBadge('local');
+        refreshSetsBadge('local');
         renderDbBanner();
       });
     }, SYNC_POLL_MS);
